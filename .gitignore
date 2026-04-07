@@ -17,3 +17,7 @@ media/
 memory/
 tasks/
 .openclaw/skills/flight-tracker/venv/
+skills/flight-tracker/venv/
+skills/*/venv/
+**/__pycache__/
+**/*.pyc
