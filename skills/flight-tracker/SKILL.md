@@ -13,11 +13,9 @@ When user asks to track a flight and estimate risk of delay:
 
 1. If user provided a flight number, run scripts/flight_tracker.py immediately with that number. Do not ask for departure/arrival first.
 2. If user explicitly says a departure airport, pass it as second argument.
-3. Summarize:
-  - aircraft registration/sign (if available)
-  - current aircraft position and current route leg
-  - required remaining rotation to reach departure airport
-  - delay risk verdict: ON_TIME, TIGHT, LIKELY_DELAY, or UNKNOWN
+3. Forward the **full script output as-is** to the user — do not summarize, shorten, or rephrase it.
+   The script output is already formatted for WhatsApp. Paste it verbatim.
+4. Optionally add a short note **after** the output if it adds value not already present — e.g. a practical recommendation, a context note about the aircraft's current rotation, or a risk callout. Do not repeat what the script already printed.
 
 Important:
 - Do not start debugging or editing the script during a normal tracking request.

@@ -704,6 +704,13 @@ def main():
         print(f"✈️  Model: {schedule['aircraft_model']}")
 
     # Step 2: Get current position
+    # Skip entirely if flight has already arrived
+    status_lower = (schedule.get('status') or '').lower()
+    if status_lower in ('arrived', 'landed', 'diverted'):
+        print(f"\n✅ Flight has {schedule['status'].lower()} — no live position needed.")
+        print(f"\n{'='*50}\n")
+        return
+
     # Priority: AviationStack live → FR24 → OpenSky
     position = None
     live = schedule.get("live")
