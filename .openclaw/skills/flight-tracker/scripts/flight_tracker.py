@@ -248,12 +248,65 @@ def get_position_opensky(icao24):
         print(f"OpenSky error: {e}")
         return None
 
+def enrich_position_from_registration_fr24(position):
+    """Fill origin/destination from FR24 using aircraft registration when missing."""
+    registration = (position or {}).get("registration")
+    if not registration:
+        return position
+    try:
+        fr_api = get_fr24_api()
+        reg_upper = registration.upper()
+        for f in fr_api.get_flights():
+            if (f.registration or "").upper() == reg_upper:
+                if not position.get("origin") and getattr(f, "origin_airport_iata", None):
+                    position["origin"] = f.origin_airport_iata
+                if not position.get("destination") and getattr(f, "destination_airport_iata", None):
+                    position["destination"] = f.destination_airport_iata
+                if not position.get("callsign") and getattr(f, "callsign", None):
+                    position["callsign"] = f.callsign
+                break
+    except Exception as e:
+        print(f"FR24 registration lookup error: {e}")
+    return position
+
+def classify_buffer(buffer_minutes):
+    if buffer_minutes is None:
+        return "UNKNOWN"
+    if buffer_minutes >= 30:
+        return "ON_TIME"
+    if buffer_minutes >= 0:
+        return "TIGHT"
+    return "LIKELY_DELAY"
+
+def humanize_scenario(scenario):
+    labels = {
+        "already_departed": "Your flight has already started boarding/departure flow",
+        "inbound_to_departure": "The aircraft is already heading to your departure airport",
+        "full_rotation": "The aircraft still needs to finish another leg before your departure",
+        "missing_schedule": "Schedule details are incomplete right now",
+    }
+    return labels.get(scenario, "Current aircraft situation")
+
+def humanize_risk(risk):
+    labels = {
+        "ON_TIME": "Looks good: low delay risk",
+        "TIGHT": "Could still make it, but timing is tight",
+        "LIKELY_DELAY": "High chance of delay based on current rotation",
+        "IN_AIR_OR_DEPARTED": "No pre-departure risk check needed now",
+        "UNKNOWN": "Not enough live data yet for a confident estimate",
+    }
+    return labels.get(risk, risk)
+
 def assess_rotation_delay(position, schedule):
     """Assess delay risk based on aircraft rotation scenario."""
     departure_iata = schedule.get("departure_iata")
     departure_scheduled = schedule.get("departure_scheduled")
     if not departure_iata or not departure_scheduled:
-        return
+        return {
+            "scenario": "missing_schedule",
+            "risk": "UNKNOWN",
+            "buffer_minutes": None,
+        }
 
     dep_time = datetime.fromisoformat(departure_scheduled.replace("Z", "+00:00"))
     now = datetime.now(timezone.utc)
@@ -263,7 +316,11 @@ def assess_rotation_delay(position, schedule):
     # Scenario 1: Flight already departed
     if flight_origin == departure_iata and now > dep_time - timedelta(minutes=30):
         print(f"\n✅ Flight already departed from {departure_iata}")
-        return
+        return {
+            "scenario": "already_departed",
+            "risk": "IN_AIR_OR_DEPARTED",
+            "buffer_minutes": None,
+        }
 
     # Scenario 2: Aircraft inbound to departure airport
     dep_icao = schedule.get("departure_icao") or iata_to_icao(departure_iata)
@@ -275,17 +332,30 @@ def assess_rotation_delay(position, schedule):
             minutes_until_dep = (dep_time - now).total_seconds() / 60
             turnaround = 50
             buffer = minutes_until_dep - eta["eta_minutes"] - turnaround
+            risk = classify_buffer(buffer)
             if buffer >= 30:
                 print(f"   ✅ ON TIME — {round(buffer)} min buffer")
             elif buffer >= 0:
                 print(f"   ⚠️  TIGHT — only {round(buffer)} min buffer")
             else:
                 print(f"   🔴 LIKELY DELAY — {round(abs(buffer))} min short")
-        return
+            return {
+                "scenario": "inbound_to_departure",
+                "risk": risk,
+                "buffer_minutes": round(buffer),
+                "eta_to_departure_minutes": eta["eta_minutes"],
+                "turnaround_minutes": turnaround,
+                "minutes_until_departure": round(minutes_until_dep),
+            }
+        return {
+            "scenario": "inbound_to_departure",
+            "risk": "UNKNOWN",
+            "buffer_minutes": None,
+        }
 
     # Scenario 3: Full rotation analysis
     print(f"\n📡 Aircraft not yet inbound to {departure_iata}, full rotation analysis...")
-    assess_full_rotation_delay(position, schedule)
+    return assess_full_rotation_delay(position, schedule)
 
 def assess_full_rotation_delay(position, schedule):
     """Full rotation: ETA to current dest + turnaround + return flight + turnaround."""
@@ -302,7 +372,12 @@ def assess_full_rotation_delay(position, schedule):
             "registration": registration
         }.items() if not v]
         print(f"   ⚠️  Missing data for rotation analysis: {', '.join(missing)}")
-        return
+        return {
+            "scenario": "full_rotation",
+            "risk": "UNKNOWN",
+            "buffer_minutes": None,
+            "missing": missing,
+        }
 
     dep_time = datetime.fromisoformat(departure_scheduled.replace("Z", "+00:00"))
     now = datetime.now(timezone.utc)
@@ -318,7 +393,12 @@ def assess_full_rotation_delay(position, schedule):
     eta = estimate_arrival(position, dest_icao) if dest_icao else None
     if not eta:
         print(f"   ⚠️  Cannot calculate ETA to {current_dest_iata}")
-        return
+        return {
+            "scenario": "full_rotation",
+            "risk": "UNKNOWN",
+            "buffer_minutes": None,
+            "missing": ["eta_to_current_destination"],
+        }
     eta_to_dest = eta["eta_minutes"]
     print(f"\n   1️⃣  ETA to {current_dest_iata}: ~{eta_to_dest} min")
 
@@ -369,6 +449,7 @@ def assess_full_rotation_delay(position, schedule):
     # Final assessment
     total_needed = eta_to_dest + turnaround_dest + (return_duration or 0) + turnaround_dep
     buffer = minutes_until_departure - total_needed
+    risk = classify_buffer(buffer)
     print(f"\n   📊 Total needed: ~{total_needed} min | Available: ~{round(minutes_until_departure)} min")
     if buffer >= 30:
         print(f"   ✅ ON TIME — {round(buffer)} min buffer")
@@ -376,14 +457,27 @@ def assess_full_rotation_delay(position, schedule):
         print(f"   ⚠️  TIGHT — only {round(buffer)} min buffer")
     else:
         print(f"   🔴 LIKELY DELAY — {round(abs(buffer))} min short")
+    return {
+        "scenario": "full_rotation",
+        "risk": risk,
+        "buffer_minutes": round(buffer),
+        "eta_to_current_destination_minutes": eta_to_dest,
+        "return_duration_minutes": return_duration,
+        "turnaround_destination_minutes": turnaround_dest,
+        "turnaround_departure_minutes": turnaround_dep,
+        "minutes_until_departure": round(minutes_until_departure),
+        "current_destination_iata": current_dest_iata,
+        "departure_iata": departure_iata,
+    }
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: flight_tracker.py <flight_number>")
-        print("Example: flight_tracker.py JU242")
+        print("Usage: flight_tracker.py <flight_number> [departure_iata]")
+        print("Example: flight_tracker.py JU242 BEG")
         sys.exit(1)
 
     flight_number = sys.argv[1].upper()
+    departure_override = sys.argv[2].upper() if len(sys.argv) >= 3 else None
 
     print(f"\n{'='*50}")
     print(f"🔍 Analyzing flight {flight_number}")
@@ -401,6 +495,11 @@ def main():
         schedule["aircraft_icao24"] = av.get("aircraft_icao24")
         schedule["aircraft_registration"] = av.get("aircraft_registration")
         schedule["live"] = av.get("live")
+
+    if departure_override:
+        schedule["departure_iata"] = departure_override
+        schedule["departure_icao"] = iata_to_icao(departure_override)
+        print(f"🧭 Departure override: {departure_override}")
 
     print(f"✈️  Flight: {schedule['flight_iata']}")
     print(f"🛫 From: {schedule['departure_airport']} ({schedule['departure_iata']})")
@@ -447,6 +546,10 @@ def main():
         if not position.get("origin"):
             position["origin"] = schedule.get("departure_iata")
 
+        # OpenSky often lacks route fields; enrich from FR24 by registration.
+        if (not position.get("origin") or not position.get("destination")) and position.get("registration"):
+            position = enrich_position_from_registration_fr24(position)
+
     # Step 3: Display position
     if position:
         alt_ft = round(position["altitude"] * 3.28084) if position.get("altitude") else 0
@@ -464,7 +567,18 @@ def main():
             print(f"🕐 Last update: {position['last_update']}")
 
         # Step 4: Delay risk assessment
-        assess_rotation_delay(position, schedule)
+        risk_result = assess_rotation_delay(position, schedule)
+        if risk_result:
+            scenario = risk_result.get('scenario', 'unknown')
+            risk = risk_result.get('risk', 'UNKNOWN')
+            # If flight already departed or in air, no pre-departure risk check needed
+            if scenario == "already_departed" or risk == "IN_AIR_OR_DEPARTED":
+                return
+            print("\n🧾 Delay outlook")
+            print(f"   {humanize_scenario(scenario)}")
+            print(f"   {humanize_risk(risk)}")
+            if risk_result.get("buffer_minutes") is not None:
+                print(f"   Buffer: {risk_result['buffer_minutes']} min")
     else:
         print("⚠️  Could not get current position")
 
