@@ -11,13 +11,17 @@ metadata:
 ## One-shot Delay Risk Workflow
 When user asks to track a flight and estimate risk of delay:
 
-1. Run scripts/flight_tracker.py with the flight number.
+1. If user provided a flight number, run scripts/flight_tracker.py immediately with that number. Do not ask for departure/arrival first.
 2. If user explicitly says a departure airport, pass it as second argument.
 3. Summarize:
   - aircraft registration/sign (if available)
   - current aircraft position and current route leg
   - required remaining rotation to reach departure airport
   - delay risk verdict: ON_TIME, TIGHT, LIKELY_DELAY, or UNKNOWN
+
+Important:
+- Do not start debugging or editing the script during a normal tracking request.
+- Only edit code when user explicitly asks to fix or improve the tracker.
 
 Examples:
 

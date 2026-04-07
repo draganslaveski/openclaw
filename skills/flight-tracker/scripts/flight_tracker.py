@@ -12,6 +12,99 @@ AERODATABOX_API_KEY = os.environ.get("AERODATABOX_API_KEY")
 
 VENV_SITE_PACKAGES = '/home/dragan-slaveski/.openclaw/workspace/.openclaw/skills/flight-tracker/venv/lib/python3.12/site-packages'
 
+
+def parse_time_any(value):
+    """Parse provider timestamps with graceful fallback."""
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # AeroDataBox UTC often comes as "YYYY-MM-DD HH:MMZ"
+    for fmt in ("%Y-%m-%d %H:%MZ", "%Y-%m-%d %H:%M:%SZ"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+    # ISO formats from providers (sometimes with trailing Z)
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def select_best_aerodatabox_flight(data):
+    """Pick the schedule entry that best matches the upcoming/current leg."""
+    if not data:
+        return None
+    if isinstance(data, dict):
+        return data
+
+    now = datetime.now(timezone.utc)
+    best = None
+    best_score = None
+
+    for item in data:
+        dep = item.get("departure", {}) if isinstance(item, dict) else {}
+        dep_utc = dep.get("scheduledTime", {}).get("utc") if isinstance(dep, dict) else None
+        dep_time = parse_time_any(dep_utc)
+        if not dep_time:
+            continue
+
+        # Prefer future departures; tolerate recent past if flight just left.
+        minutes = (dep_time - now).total_seconds() / 60
+        if minutes >= -180:
+            score = abs(minutes)
+        else:
+            score = abs(minutes) + 10000
+
+        if best is None or score < best_score:
+            best = item
+            best_score = score
+
+    return best or data[0]
+
+
+def select_best_aviationstack_flight(items, schedule_hint):
+    """Pick aviationstack record matching the selected schedule leg."""
+    if not items:
+        return None
+
+    hint_dep = (schedule_hint or {}).get("departure_iata")
+    hint_arr = (schedule_hint or {}).get("arrival_iata")
+    hint_dep_time = parse_time_any((schedule_hint or {}).get("departure_scheduled"))
+
+    now = datetime.now(timezone.utc)
+    best = None
+    best_score = None
+
+    for f in items:
+        dep_iata = ((f.get("departure") or {}).get("iata") or "").upper()
+        arr_iata = ((f.get("arrival") or {}).get("iata") or "").upper()
+        dep_time = parse_time_any((f.get("departure") or {}).get("scheduled"))
+
+        score = 0
+        if hint_dep and dep_iata and dep_iata != hint_dep.upper():
+            score += 5000
+        if hint_arr and arr_iata and arr_iata != hint_arr.upper():
+            score += 5000
+
+        if dep_time and hint_dep_time:
+            score += abs((dep_time - hint_dep_time).total_seconds()) / 60
+        elif dep_time:
+            score += abs((dep_time - now).total_seconds()) / 60
+        else:
+            score += 1000
+
+        if best is None or score < best_score:
+            best = f
+            best_score = score
+
+    return best or items[0]
+
+
 def get_fr24_api():
     sys.path.insert(0, VENV_SITE_PACKAGES)
     from FlightRadar24 import FlightRadar24API
@@ -126,20 +219,18 @@ def get_flight_schedule_aerodatabox(flight_number):
         if not data:
             return None
 
-        flight = data[0]
+        flight = select_best_aerodatabox_flight(data)
         dep = flight.get("departure", {})
         arr = flight.get("arrival", {})
 
         # Calculate flight duration
         duration_min = None
-        try:
-            dep_sched = dep.get("scheduledTime", {}).get("utc", "")
-            arr_sched = arr.get("scheduledTime", {}).get("utc", "")
-            d = datetime.strptime(dep_sched, "%Y-%m-%d %H:%MZ")
-            a = datetime.strptime(arr_sched, "%Y-%m-%d %H:%MZ")
+        dep_sched = dep.get("scheduledTime", {}).get("utc", "")
+        arr_sched = arr.get("scheduledTime", {}).get("utc", "")
+        d = parse_time_any(dep_sched)
+        a = parse_time_any(arr_sched)
+        if d and a:
             duration_min = round((a - d).total_seconds() / 60)
-        except Exception:
-            pass
 
         return {
             "flight_iata": flight.get("number", "").replace(" ", ""),
@@ -162,7 +253,8 @@ def get_flight_schedule_aerodatabox(flight_number):
         print(f"AeroDataBox error: {e}")
         return None
 
-def get_flight_schedule_aviationstack(flight_number):
+
+def get_flight_schedule_aviationstack(flight_number, schedule_hint=None):
     """Get flight schedule + aircraft icao24 from AviationStack."""
     try:
         response = requests.get(
@@ -175,9 +267,11 @@ def get_flight_schedule_aviationstack(flight_number):
         )
         response.raise_for_status()
         data = response.json()
-        if not data.get("data"):
+        items = data.get("data") or []
+        if not items:
             return None
-        flight = data["data"][0]
+
+        flight = select_best_aviationstack_flight(items, schedule_hint or {})
         return {
             "aircraft_icao24": flight.get("aircraft", {}).get("icao24"),
             "aircraft_registration": flight.get("aircraft", {}).get("registration"),
@@ -490,7 +584,7 @@ def main():
         print("❌ Could not find schedule")
         sys.exit(1)
 
-    av = get_flight_schedule_aviationstack(flight_number)
+    av = get_flight_schedule_aviationstack(flight_number, schedule)
     if av:
         schedule["aircraft_icao24"] = av.get("aircraft_icao24")
         schedule["aircraft_registration"] = av.get("aircraft_registration")
@@ -516,21 +610,42 @@ def main():
     position = None
     live = schedule.get("live")
     if live and live.get("latitude"):
-        position = {
-            "callsign": schedule.get("callsign", ""),
-            "longitude": live.get("longitude"),
-            "latitude": live.get("latitude"),
-            "altitude": live.get("altitude") or 0,
-            "velocity": (live.get("speed_horizontal") or 0) / 3.6,
-            "heading": live.get("direction", 0),
-            "on_ground": live.get("is_ground", False),
-            "last_update": live.get("updated", ""),
-            "registration": schedule.get("aircraft_registration"),
-            "origin": schedule.get("departure_iata"),
-            "destination": schedule.get("arrival_iata"),
-        }
-        print("📡 Using AviationStack live data")
-    else:
+        use_live = True
+        dep_dt = parse_time_any(schedule.get("departure_scheduled"))
+        dep_iata = schedule.get("departure_iata")
+        dep_icao = schedule.get("departure_icao") or iata_to_icao(dep_iata)
+
+        # Guard against stale live snapshots from a different leg with same flight number.
+        if dep_dt and dep_dt > datetime.now(timezone.utc) + timedelta(minutes=20) and dep_icao:
+            dep_airport = get_airport_coords(dep_icao)
+            if dep_airport and live.get("longitude") is not None and live.get("latitude") is not None:
+                distance_from_dep = haversine(
+                    float(live.get("latitude")),
+                    float(live.get("longitude")),
+                    dep_airport["lat"],
+                    dep_airport["lon"],
+                )
+                if distance_from_dep > 150:
+                    use_live = False
+                    print(f"📡 Ignoring stale live record ({round(distance_from_dep)} km from departure airport)")
+
+        if use_live:
+            position = {
+                "callsign": schedule.get("callsign", ""),
+                "longitude": live.get("longitude"),
+                "latitude": live.get("latitude"),
+                "altitude": live.get("altitude") or 0,
+                "velocity": (live.get("speed_horizontal") or 0) / 3.6,
+                "heading": live.get("direction", 0),
+                "on_ground": live.get("is_ground", False),
+                "last_update": live.get("updated", ""),
+                "registration": schedule.get("aircraft_registration"),
+                "origin": schedule.get("departure_iata"),
+                "destination": schedule.get("arrival_iata"),
+            }
+            print("📡 Using AviationStack live data")
+
+    if not position:
         print("📡 Trying FlightRadar24...")
         position = get_position_fr24(flight_number)
         if not position:
