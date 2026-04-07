@@ -202,6 +202,32 @@ def estimate_arrival(position, airport_icao):
         "eta_minutes": round(minutes)
     }
 
+def _resolve_scheduled_utc(time_block):
+    """
+    Derive a UTC ISO string from an AeroDataBox scheduledTime block.
+
+    AeroDataBox's "utc" field is sometimes populated with local wall-clock time
+    (a known data quality issue), which causes departure countdowns to be off by
+    the local UTC offset (e.g. +2 h for CET/CEST).  The "local" field always
+    carries an explicit offset (+HH:MM), so converting that to UTC is more
+    reliable.  We prefer that path and fall back to the raw "utc" string only
+    when the local field is unavailable or lacks an offset.
+    """
+    local_str = time_block.get("local") if isinstance(time_block, dict) else None
+    utc_str = (time_block.get("utc", "") or "") if isinstance(time_block, dict) else ""
+
+    if local_str:
+        local_dt = parse_time_any(local_str)
+        if local_dt and local_dt.utcoffset() is not None:
+            utc_dt = local_dt.astimezone(timezone.utc)
+            return utc_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    # Fall back to raw UTC field
+    if utc_str:
+        return utc_str.replace("Z", "+00:00").replace(" ", "T")
+    return ""
+
+
 def get_flight_schedule_aerodatabox(flight_number):
     """Get today's flight schedule from AeroDataBox."""
     try:
@@ -223,12 +249,13 @@ def get_flight_schedule_aerodatabox(flight_number):
         dep = flight.get("departure", {})
         arr = flight.get("arrival", {})
 
-        # Calculate flight duration
+        departure_scheduled = _resolve_scheduled_utc(dep.get("scheduledTime", {}))
+        arrival_scheduled = _resolve_scheduled_utc(arr.get("scheduledTime", {}))
+
+        # Calculate flight duration from resolved UTC times
         duration_min = None
-        dep_sched = dep.get("scheduledTime", {}).get("utc", "")
-        arr_sched = arr.get("scheduledTime", {}).get("utc", "")
-        d = parse_time_any(dep_sched)
-        a = parse_time_any(arr_sched)
+        d = parse_time_any(departure_scheduled)
+        a = parse_time_any(arrival_scheduled)
         if d and a:
             duration_min = round((a - d).total_seconds() / 60)
 
@@ -237,10 +264,12 @@ def get_flight_schedule_aerodatabox(flight_number):
             "departure_iata": dep.get("airport", {}).get("iata"),
             "departure_icao": dep.get("airport", {}).get("icao"),
             "departure_airport": dep.get("airport", {}).get("name"),
-            "departure_scheduled": dep.get("scheduledTime", {}).get("utc", "").replace("Z", "+00:00").replace(" ", "T"),
+            "departure_scheduled": departure_scheduled,
             "departure_scheduled_local": dep.get("scheduledTime", {}).get("local"),
             "arrival_iata": arr.get("airport", {}).get("iata"),
+            "arrival_icao": arr.get("airport", {}).get("icao"),
             "arrival_airport": arr.get("airport", {}).get("name"),
+            "arrival_scheduled": arrival_scheduled,
             "arrival_scheduled_local": arr.get("scheduledTime", {}).get("local"),
             "flight_duration_min": duration_min,
             "status": flight.get("status"),
@@ -383,13 +412,76 @@ def humanize_scenario(scenario):
 
 def humanize_risk(risk):
     labels = {
-        "ON_TIME": "Looks good: low delay risk",
+        "ON_TIME": "Looks good: on track to arrive on time",
         "TIGHT": "Could still make it, but timing is tight",
-        "LIKELY_DELAY": "High chance of delay based on current rotation",
-        "IN_AIR_OR_DEPARTED": "No pre-departure risk check needed now",
+        "LIKELY_DELAY": "High chance of delay based on current position",
+        "IN_AIR_OR_DEPARTED": "Flight is airborne — no pre-departure risk check needed",
         "UNKNOWN": "Not enough live data yet for a confident estimate",
     }
     return labels.get(risk, risk)
+
+def assess_inflight_delay(position, schedule):
+    """
+    Assess arrival delay for a flight that is currently airborne.
+
+    Uses the aircraft's current coordinates + ground speed to estimate ETA to
+    the arrival airport, then compares that against the scheduled arrival time.
+    """
+    arrival_iata = schedule.get("arrival_iata")
+    arrival_icao = schedule.get("arrival_icao") or iata_to_icao(arrival_iata)
+    arrival_scheduled = schedule.get("arrival_scheduled")
+
+    # Derive scheduled arrival from departure + duration if direct field missing
+    if not arrival_scheduled:
+        dep_scheduled = schedule.get("departure_scheduled")
+        duration_min = schedule.get("flight_duration_min")
+        if dep_scheduled and duration_min:
+            dep_dt = parse_time_any(dep_scheduled)
+            if dep_dt:
+                arr_dt = dep_dt + timedelta(minutes=duration_min)
+                arrival_scheduled = arr_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    if not arrival_icao or not arrival_scheduled:
+        print("   ⚠️  Cannot assess in-flight delay (missing arrival airport or schedule)")
+        return None
+
+    if position.get("on_ground"):
+        print("   ℹ️  Aircraft is on the ground — skipping in-flight ETA check")
+        return None
+
+    eta = estimate_arrival(position, arrival_icao)
+    if not eta:
+        print(f"   ⚠️  Cannot calculate ETA to {arrival_iata or arrival_icao} (missing position/speed)")
+        return None
+
+    arr_time = parse_time_any(arrival_scheduled)
+    if not arr_time:
+        print("   ⚠️  Cannot parse scheduled arrival time")
+        return None
+
+    now = datetime.now(timezone.utc)
+    scheduled_in_min = (arr_time - now).total_seconds() / 60
+    buffer = scheduled_in_min - eta["eta_minutes"]
+    risk = classify_buffer(buffer)
+
+    print(f"\n✈️  In-flight delay assessment:")
+    print(f"   ETA to {eta['airport']}: ~{eta['eta_minutes']} min ({eta['distance_km']} km at {eta['speed_kmh']} km/h)")
+    print(f"   Scheduled arrival in: ~{round(scheduled_in_min)} min")
+    if buffer >= 30:
+        print(f"   ✅ ON TIME — {round(buffer)} min ahead of schedule")
+    elif buffer >= 0:
+        print(f"   ⚠️  TIGHT — only {round(buffer)} min to spare")
+    else:
+        print(f"   🔴 LIKELY DELAY — ~{round(abs(buffer))} min late based on current position")
+
+    return {
+        "scenario": "inflight",
+        "risk": risk,
+        "buffer_minutes": round(buffer),
+        "eta_to_arrival_minutes": eta["eta_minutes"],
+        "scheduled_arrival_in_minutes": round(scheduled_in_min),
+        "arrival_iata": arrival_iata,
+    }
 
 def assess_rotation_delay(position, schedule):
     """Assess delay risk based on aircraft rotation scenario."""
@@ -407,9 +499,12 @@ def assess_rotation_delay(position, schedule):
     flight_dest = position.get("destination") or ""
     flight_origin = position.get("origin") or ""
 
-    # Scenario 1: Flight already departed
+    # Scenario 1: Flight already departed — assess in-flight delay if airborne
     if flight_origin == departure_iata and now > dep_time - timedelta(minutes=30):
-        print(f"\n✅ Flight already departed from {departure_iata}")
+        print(f"\n✅ Flight has departed from {departure_iata}")
+        inflight = assess_inflight_delay(position, schedule)
+        if inflight:
+            return inflight
         return {
             "scenario": "already_departed",
             "risk": "IN_AIR_OR_DEPARTED",
@@ -686,14 +781,23 @@ def main():
         if risk_result:
             scenario = risk_result.get('scenario', 'unknown')
             risk = risk_result.get('risk', 'UNKNOWN')
-            # If flight already departed or in air, no pre-departure risk check needed
-            if scenario == "already_departed" or risk == "IN_AIR_OR_DEPARTED":
-                return
-            print("\n🧾 Delay outlook")
-            print(f"   {humanize_scenario(scenario)}")
-            print(f"   {humanize_risk(risk)}")
-            if risk_result.get("buffer_minutes") is not None:
-                print(f"   Buffer: {risk_result['buffer_minutes']} min")
+            if scenario == "already_departed" and risk == "IN_AIR_OR_DEPARTED":
+                # Couldn't produce in-flight estimate (e.g. on ground, no arrival data)
+                print("\n🧾 Delay outlook")
+                print(f"   {humanize_scenario(scenario)}")
+                print(f"   {humanize_risk(risk)}")
+            elif scenario not in ("already_departed", "inflight"):
+                print("\n🧾 Delay outlook")
+                print(f"   {humanize_scenario(scenario)}")
+                print(f"   {humanize_risk(risk)}")
+                if risk_result.get("buffer_minutes") is not None:
+                    print(f"   Buffer: {risk_result['buffer_minutes']} min")
+            else:
+                # inflight scenario: summary already printed inside assess_inflight_delay
+                print("\n🧾 Delay outlook")
+                print(f"   {humanize_risk(risk)}")
+                if risk_result.get("buffer_minutes") is not None:
+                    print(f"   Buffer: {risk_result['buffer_minutes']} min")
     else:
         print("⚠️  Could not get current position")
 
