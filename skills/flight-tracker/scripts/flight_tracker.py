@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 import sys
+import os
+
+VENV_SITE_PACKAGES = '/home/dragan-slaveski/.openclaw/workspace/skills/flight-tracker/venv/lib/python3.12/site-packages'
+if VENV_SITE_PACKAGES not in sys.path:
+    sys.path.insert(0, VENV_SITE_PACKAGES)
+
 import math
 import requests
 from datetime import datetime, timezone, timedelta
-import os
 
 OPENSKY_CLIENT_ID = os.environ.get("OPENSKY_CLIENT_ID")
 OPENSKY_CLIENT_SECRET = os.environ.get("OPENSKY_CLIENT_SECRET")
 AVIATIONSTACK_API_KEY = os.environ.get("AVIATIONSTACK_API_KEY")
 AERODATABOX_API_KEY = os.environ.get("AERODATABOX_API_KEY")
-
-VENV_SITE_PACKAGES = '/home/dragan-slaveski/.openclaw/workspace/.openclaw/skills/flight-tracker/venv/lib/python3.12/site-packages'
 
 
 def parse_time_any(value):
