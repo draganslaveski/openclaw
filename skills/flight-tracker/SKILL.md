@@ -43,9 +43,10 @@ When user asks to track a flight and receive periodic updates:
   "sessionTarget": "isolated",
   "payload": {
     "kind": "agentTurn",
-    "message": "Use flight-tracker skill to check flight W61234 (departure BEG), report delay risk based on aircraft current position + required return rotation, and send WhatsApp update. If flight has landed, delete this cron job."
+    "message": "Use flight-tracker skill to check flight W61234 (departure BEG). Return only the final user-facing WhatsApp update: paste the full script output verbatim, and optionally add one short value-adding note at the end. Do not include chain of thought, analysis, planning, or tool narration. If the flight has landed, delete this cron job."
   }
 }
 ```
-3. Confirm to user that tracking has started and they will receive updates every 30 minutes.
-4. When flight lands (on_ground=true), delete the cron job automatically.
+3. In cron-triggered isolated turns, return only the final user-facing message body.
+4. Confirm to user that tracking has started and they will receive updates every 30 minutes.
+5. When flight lands (on_ground=true), delete the cron job automatically.

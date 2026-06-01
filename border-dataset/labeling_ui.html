@@ -1,0 +1,749 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Border Queue Labeler</title>
+  <style>
+    :root {
+      --bg: #efe7da;
+      --panel: rgba(255, 250, 242, 0.92);
+      --panel-strong: rgba(255, 252, 247, 0.98);
+      --ink: #1f1b18;
+      --muted: #6c6358;
+      --accent: #0e6d5b;
+      --accent-strong: #094b3f;
+      --warning: #9c4d1a;
+      --danger: #8a2f2f;
+      --line: rgba(31, 27, 24, 0.12);
+      --shadow: 0 24px 70px rgba(76, 50, 28, 0.16);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(255, 255, 255, 0.75), transparent 38%),
+        radial-gradient(circle at bottom right, rgba(196, 142, 90, 0.18), transparent 32%),
+        linear-gradient(180deg, #efe7da 0%, #e6ddcf 100%);
+      font: 16px/1.45 Georgia, "Times New Roman", serif;
+    }
+
+    body {
+      padding: 24px;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 340px minmax(0, 1fr);
+      gap: 18px;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(8px);
+    }
+
+    .sidebar {
+      padding: 24px 22px;
+      position: sticky;
+      top: 24px;
+      align-self: start;
+    }
+
+    .viewer {
+      padding: 20px;
+      display: grid;
+      gap: 18px;
+    }
+
+    h1, h2, h3, p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 2rem;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+      margin-bottom: 8px;
+    }
+
+    .eyebrow {
+      font: 600 0.72rem/1.2 ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 10px;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-family: ui-sans-serif, system-ui, sans-serif;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .stat {
+      background: rgba(255, 255, 255, 0.62);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 12px 14px;
+    }
+
+    .stat strong {
+      display: block;
+      font-size: 1.4rem;
+      margin-bottom: 2px;
+    }
+
+    .control {
+      margin-top: 16px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 7px;
+      font: 600 0.85rem/1.2 ui-sans-serif, system-ui, sans-serif;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+    }
+
+    select,
+    textarea,
+    input[type="range"] {
+      width: 100%;
+    }
+
+    select,
+    textarea {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px 13px;
+      background: rgba(255, 255, 255, 0.85);
+      color: var(--ink);
+      font: 500 0.98rem/1.35 ui-sans-serif, system-ui, sans-serif;
+    }
+
+    textarea {
+      min-height: 88px;
+      resize: vertical;
+    }
+
+    input[type="range"] {
+      accent-color: var(--accent);
+    }
+
+    .range-row,
+    .button-row,
+    .nav-row,
+    .meta-grid,
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .range-value {
+      min-width: 92px;
+      padding: 9px 12px;
+      border-radius: 999px;
+      background: rgba(14, 109, 91, 0.1);
+      color: var(--accent-strong);
+      font: 700 0.95rem/1 ui-sans-serif, system-ui, sans-serif;
+      text-align: center;
+    }
+
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 11px 16px;
+      cursor: pointer;
+      font: 700 0.95rem/1 ui-sans-serif, system-ui, sans-serif;
+      transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    button:active {
+      transform: translateY(0);
+    }
+
+    .primary {
+      background: var(--accent);
+      color: #f7f4ed;
+    }
+
+    .secondary {
+      background: rgba(31, 27, 24, 0.08);
+      color: var(--ink);
+    }
+
+    .danger {
+      background: rgba(138, 47, 47, 0.12);
+      color: var(--danger);
+    }
+
+    .chip {
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      padding: 7px 11px;
+      background: rgba(255, 255, 255, 0.75);
+      font: 600 0.84rem/1 ui-sans-serif, system-ui, sans-serif;
+      color: var(--muted);
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 330px;
+      gap: 18px;
+    }
+
+    .image-card {
+      overflow: hidden;
+      border-radius: 22px;
+      background: #2b2621;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      min-height: 520px;
+      display: grid;
+      place-items: center;
+      position: relative;
+    }
+
+    .image-card img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(0, 0, 0, 0.2));
+    }
+
+    .loading {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: rgba(255, 255, 255, 0.72);
+      font: 600 1rem/1 ui-sans-serif, system-ui, sans-serif;
+      background: rgba(20, 16, 12, 0.3);
+    }
+
+    .meta {
+      padding: 20px;
+      background: var(--panel-strong);
+      border-radius: 22px;
+      border: 1px solid var(--line);
+    }
+
+    .meta-grid {
+      margin-top: 14px;
+      flex-direction: column;
+    }
+
+    .meta-item {
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(31, 27, 24, 0.08);
+      font-family: ui-sans-serif, system-ui, sans-serif;
+    }
+
+    .meta-item:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .meta-item span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 5px;
+    }
+
+    .status {
+      padding: 12px 14px;
+      border-radius: 16px;
+      font: 600 0.9rem/1.4 ui-sans-serif, system-ui, sans-serif;
+      background: rgba(255, 255, 255, 0.75);
+      border: 1px solid var(--line);
+      color: var(--muted);
+    }
+
+    .status.error {
+      color: var(--danger);
+      background: rgba(138, 47, 47, 0.08);
+    }
+
+    .status.good {
+      color: var(--accent-strong);
+      background: rgba(14, 109, 91, 0.1);
+    }
+
+    .hint {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(31, 27, 24, 0.08);
+      font: 500 0.85rem/1.6 ui-sans-serif, system-ui, sans-serif;
+      color: var(--muted);
+    }
+
+    @media (max-width: 1180px) {
+      .shell,
+      .hero {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        position: static;
+      }
+    }
+
+    @media (max-width: 700px) {
+      body {
+        padding: 14px;
+      }
+
+      .sidebar,
+      .viewer,
+      .meta {
+        padding: 16px;
+      }
+
+      .image-card {
+        min-height: 300px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="panel sidebar">
+      <div class="eyebrow">Border Dataset</div>
+      <h1>Queue Labeler</h1>
+      <p class="muted">Estimate queue size per frame on a 0-100 scale, keep unusable shots out of training, and save labels directly into the dataset tree.</p>
+
+      <div class="stats">
+        <div class="stat"><strong id="stat-total">-</strong><span class="muted">Total frames</span></div>
+        <div class="stat"><strong id="stat-labeled">-</strong><span class="muted">Labeled</span></div>
+        <div class="stat"><strong id="stat-unlabeled">-</strong><span class="muted">Remaining</span></div>
+        <div class="stat"><strong id="stat-unusable">-</strong><span class="muted">Unusable</span></div>
+      </div>
+
+      <div class="control">
+        <label for="camera-filter">Camera</label>
+        <select id="camera-filter"></select>
+      </div>
+
+      <div class="control">
+        <label for="status-filter">Frame status</label>
+        <select id="status-filter">
+          <option value="all">All frames</option>
+          <option value="unlabeled" selected>Only unlabeled</option>
+          <option value="labeled">Only labeled</option>
+          <option value="unusable">Only unusable</option>
+        </select>
+      </div>
+
+      <div class="control">
+        <label for="order-select">Order</label>
+        <select id="order-select">
+          <option value="oldest">Oldest first</option>
+          <option value="newest">Newest first</option>
+        </select>
+      </div>
+
+      <div class="control">
+        <label for="line-range">Queue size estimate (hidden)</label>
+        <input id="line-range" type="range" min="0" max="100" step="1" value="50" style="display: none;">
+        <div class="range-value" id="range-value" style="display: none;">50%</div>
+      </div>
+
+      <div class="control">
+        <label>Quick label (or use 1-4 keys)</label>
+        <div class="chips">
+          <button class="secondary" id="btn-light" data-preset="13">1: Light (13%)</button>
+          <button class="secondary" id="btn-medium" data-preset="38">2: Medium (38%)</button>
+          <button class="secondary" id="btn-high" data-preset="63">3: High (63%)</button>
+          <button class="secondary" id="btn-extreme" data-preset="88">4: Extreme (88%)</button>
+        </div>
+      </div>
+
+      <div class="control">
+        <label for="notes">Notes</label>
+        <textarea id="notes" placeholder="Visibility issues, unusual traffic patterns, weather, blocked lane..."></textarea>
+      </div>
+
+      <div class="button-row" style="margin-top: 16px;">
+        <button class="primary" id="save-next">Save + next</button>
+        <button class="secondary" id="save-stay">Save</button>
+        <button class="danger" id="mark-unusable">Mark unusable</button>
+      </div>
+
+      <div class="hint">
+        Shortcuts: <strong>1-4</strong> label and auto-advance, <strong>U</strong> mark unusable, <strong>Left/Right</strong> move between frames.
+      </div>
+    </aside>
+
+    <main class="panel viewer">
+      <div class="hero">
+        <section class="image-card">
+          <img id="frame-image" alt="Border camera frame">
+          <div class="loading" id="image-loading">Loading frame...</div>
+        </section>
+
+        <section class="meta">
+          <div class="eyebrow">Current Frame</div>
+          <h2 id="frame-title">Loading...</h2>
+          <div class="chips" style="margin-top: 14px;">
+            <div class="chip" id="position-chip">0 / 0</div>
+            <div class="chip" id="bucket-chip">Bucket: -</div>
+            <div class="chip" id="label-chip">Unlabeled</div>
+          </div>
+
+          <div class="meta-grid">
+            <div class="meta-item"><span>Camera</span><div id="meta-camera">-</div></div>
+            <div class="meta-item"><span>Captured At</span><div id="meta-captured">-</div></div>
+            <div class="meta-item"><span>Relative File</span><div id="meta-file">-</div></div>
+            <div class="meta-item"><span>Source URL</span><div id="meta-url">-</div></div>
+          </div>
+
+          <div class="nav-row" style="margin-top: 18px;">
+            <button class="secondary" id="prev-btn">Previous</button>
+            <button class="secondary" id="next-btn">Next</button>
+            <button class="secondary" id="reload-btn">Reload dataset</button>
+          </div>
+        </section>
+      </div>
+
+      <div id="status" class="status">Connecting to labeling backend...</div>
+    </main>
+  </div>
+
+  <script>
+    const state = {
+      dataset: null,
+      filteredSamples: [],
+      currentIndex: 0,
+    };
+
+    const els = {
+      cameraFilter: document.getElementById('camera-filter'),
+      statusFilter: document.getElementById('status-filter'),
+      orderSelect: document.getElementById('order-select'),
+      lineRange: document.getElementById('line-range'),
+      rangeValue: document.getElementById('range-value'),
+      notes: document.getElementById('notes'),
+      saveNext: document.getElementById('save-next'),
+      saveStay: document.getElementById('save-stay'),
+      markUnusable: document.getElementById('mark-unusable'),
+      frameImage: document.getElementById('frame-image'),
+      imageLoading: document.getElementById('image-loading'),
+      frameTitle: document.getElementById('frame-title'),
+      positionChip: document.getElementById('position-chip'),
+      bucketChip: document.getElementById('bucket-chip'),
+      labelChip: document.getElementById('label-chip'),
+      metaCamera: document.getElementById('meta-camera'),
+      metaCaptured: document.getElementById('meta-captured'),
+      metaFile: document.getElementById('meta-file'),
+      metaUrl: document.getElementById('meta-url'),
+      status: document.getElementById('status'),
+      prevBtn: document.getElementById('prev-btn'),
+      nextBtn: document.getElementById('next-btn'),
+      reloadBtn: document.getElementById('reload-btn'),
+      statTotal: document.getElementById('stat-total'),
+      statLabeled: document.getElementById('stat-labeled'),
+      statUnlabeled: document.getElementById('stat-unlabeled'),
+      statUnusable: document.getElementById('stat-unusable'),
+    };
+
+    function setStatus(message, kind = '') {
+      els.status.textContent = message;
+      els.status.className = `status ${kind}`.trim();
+    }
+
+    function bucketForPercent(value) {
+      if (value <= 25) return 'light';
+      if (value <= 50) return 'medium';
+      if (value <= 75) return 'high';
+      return 'extreme';
+    }
+
+    function updateRangeDisplay() {
+      const value = Number(els.lineRange.value);
+      els.rangeValue.textContent = `${value}%`;
+      els.bucketChip.textContent = `Bucket: ${bucketForPercent(value)}`;
+    }
+
+    function currentSample() {
+      return state.filteredSamples[state.currentIndex] || null;
+    }
+
+    function buildFilters() {
+      const cameraId = els.cameraFilter.value || 'all';
+      const status = els.statusFilter.value || 'all';
+      const order = els.orderSelect.value || 'oldest';
+      let samples = [...(state.dataset?.samples || [])];
+
+      if (cameraId !== 'all') {
+        samples = samples.filter((sample) => sample.camera_id === cameraId);
+      }
+
+      if (status === 'unlabeled') {
+        samples = samples.filter((sample) => !sample.label);
+      } else if (status === 'labeled') {
+        samples = samples.filter((sample) => sample.label && sample.label.is_usable !== false);
+      } else if (status === 'unusable') {
+        samples = samples.filter((sample) => sample.label && sample.label.is_usable === false);
+      }
+
+      samples.sort((left, right) => {
+        if (order === 'newest') {
+          return right.captured_at.localeCompare(left.captured_at);
+        }
+        return left.captured_at.localeCompare(right.captured_at);
+      });
+
+      state.filteredSamples = samples;
+      if (state.currentIndex >= samples.length) {
+        state.currentIndex = Math.max(samples.length - 1, 0);
+      }
+      render();
+    }
+
+    function populateCameraFilter(selectedValue) {
+      els.cameraFilter.innerHTML = '';
+      const all = document.createElement('option');
+      all.value = 'all';
+      all.textContent = 'All cameras';
+      els.cameraFilter.appendChild(all);
+
+      for (const cameraId of state.dataset.cameras) {
+        const option = document.createElement('option');
+        option.value = cameraId;
+        option.textContent = cameraId;
+        els.cameraFilter.appendChild(option);
+      }
+
+      const desiredValue = selectedValue || 'all';
+      const hasDesiredValue = Array.from(els.cameraFilter.options).some((option) => option.value === desiredValue);
+      els.cameraFilter.value = hasDesiredValue ? desiredValue : 'all';
+    }
+
+    function renderStats() {
+      const stats = state.dataset?.stats || {};
+      els.statTotal.textContent = stats.total ?? 0;
+      els.statLabeled.textContent = stats.labeled ?? 0;
+      els.statUnlabeled.textContent = stats.unlabeled ?? 0;
+      els.statUnusable.textContent = stats.unusable ?? 0;
+    }
+
+    function render() {
+      renderStats();
+      const sample = currentSample();
+      if (!sample) {
+        els.frameTitle.textContent = 'No frames match the current filter';
+        els.positionChip.textContent = '0 / 0';
+        els.labelChip.textContent = 'Empty selection';
+        els.metaCamera.textContent = '-';
+        els.metaCaptured.textContent = '-';
+        els.metaFile.textContent = '-';
+        els.metaUrl.textContent = '-';
+        els.frameImage.removeAttribute('src');
+        els.imageLoading.textContent = 'Nothing to show';
+        els.imageLoading.hidden = false;
+        setStatus('Adjust the filters or reload the dataset.', '');
+        return;
+      }
+
+      els.positionChip.textContent = `${state.currentIndex + 1} / ${state.filteredSamples.length}`;
+      els.frameTitle.textContent = `${sample.camera_id} @ ${sample.captured_at}`;
+      els.metaCamera.textContent = sample.camera_id;
+      els.metaCaptured.textContent = sample.captured_at;
+      els.metaFile.textContent = sample.relative_file;
+      els.metaUrl.textContent = sample.source_url || '-';
+
+      const label = sample.label;
+      if (label && label.is_usable === false) {
+        els.labelChip.textContent = 'Marked unusable';
+        els.notes.value = label.notes || '';
+        els.lineRange.value = 50;
+      } else if (label) {
+        els.labelChip.textContent = `Labeled ${label.line_percent}%`;
+        els.notes.value = label.notes || '';
+        els.lineRange.value = label.line_percent;
+      } else {
+        els.labelChip.textContent = 'Unlabeled';
+        els.notes.value = '';
+        els.lineRange.value = 50;
+      }
+
+      updateRangeDisplay();
+      els.imageLoading.hidden = false;
+      els.imageLoading.textContent = 'Loading frame...';
+      els.frameImage.onload = () => { els.imageLoading.hidden = true; };
+      els.frameImage.onerror = () => {
+        els.imageLoading.hidden = false;
+        els.imageLoading.textContent = 'Failed to load frame';
+        setStatus('Image load failed for the current frame.', 'error');
+      };
+      els.frameImage.src = `${sample.image_url}?v=${encodeURIComponent(sample.captured_at)}`;
+      setStatus('Ready.', 'good');
+    }
+
+    async function loadDataset() {
+      const selectedCamera = els.cameraFilter.value || 'all';
+      const selectedStatus = els.statusFilter.value || 'all';
+      const selectedOrder = els.orderSelect.value || 'oldest';
+      setStatus('Loading dataset...', '');
+      const response = await fetch('/api/dataset', { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error(`Dataset request failed with ${response.status}`);
+      }
+
+      state.dataset = await response.json();
+      populateCameraFilter(selectedCamera);
+      els.statusFilter.value = selectedStatus;
+      els.orderSelect.value = selectedOrder;
+      buildFilters();
+      setStatus(`Loaded ${state.dataset.stats.total} frames. Labels file: ${state.dataset.label_file}`, 'good');
+    }
+
+    async function saveLabel(isUsable, moveNext) {
+      const sample = currentSample();
+      if (!sample) {
+        return;
+      }
+
+      const payload = {
+        sample_id: sample.sample_id,
+        is_usable: isUsable,
+        line_percent: isUsable ? Number(els.lineRange.value) : null,
+        notes: els.notes.value.trim(),
+      };
+
+      setStatus('Saving label...', '');
+      const response = await fetch('/api/labels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || `Save failed with ${response.status}`);
+      }
+
+      sample.label = data.label;
+      if (state.dataset?.stats) {
+        await loadDataset();
+      }
+      setStatus('Label saved.', 'good');
+
+      const shouldAdvanceAfterReload = moveNext && els.statusFilter.value !== 'unlabeled';
+      if (shouldAdvanceAfterReload) {
+        nextSample();
+      } else {
+        render();
+      }
+    }
+
+    function nextSample() {
+      if (!state.filteredSamples.length) {
+        return;
+      }
+      state.currentIndex = Math.min(state.currentIndex + 1, state.filteredSamples.length - 1);
+      render();
+    }
+
+    function prevSample() {
+      if (!state.filteredSamples.length) {
+        return;
+      }
+      state.currentIndex = Math.max(state.currentIndex - 1, 0);
+      render();
+    }
+
+    document.querySelectorAll('[data-preset]').forEach((button) => {
+      button.addEventListener('click', () => {
+        els.lineRange.value = button.dataset.preset;
+        updateRangeDisplay();
+        saveLabel(true, true).catch((error) => setStatus(error.message, 'error'));
+      });
+    });
+
+    els.cameraFilter.addEventListener('change', buildFilters);
+    els.statusFilter.addEventListener('change', () => {
+      state.currentIndex = 0;
+      buildFilters();
+    });
+    els.orderSelect.addEventListener('change', () => {
+      state.currentIndex = 0;
+      buildFilters();
+    });
+    els.lineRange.addEventListener('input', updateRangeDisplay);
+    els.saveNext.addEventListener('click', () => saveLabel(true, true).catch((error) => setStatus(error.message, 'error')));
+    els.saveStay.addEventListener('click', () => saveLabel(true, false).catch((error) => setStatus(error.message, 'error')));
+    els.markUnusable.addEventListener('click', () => saveLabel(false, true).catch((error) => setStatus(error.message, 'error')));
+    els.prevBtn.addEventListener('click', prevSample);
+    els.nextBtn.addEventListener('click', nextSample);
+    els.reloadBtn.addEventListener('click', async () => {
+      setStatus('Reloading dataset...', '');
+      const response = await fetch('/api/reload', { method: 'POST' });
+      if (!response.ok) {
+        setStatus('Dataset reload failed.', 'error');
+        return;
+      }
+      await loadDataset().catch((error) => setStatus(error.message, 'error'));
+    });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.target && ['TEXTAREA', 'SELECT'].includes(event.target.tagName)) {
+        return;
+      }
+
+      if (event.key === 'ArrowRight') {
+        nextSample();
+      } else if (event.key === 'ArrowLeft') {
+        prevSample();
+      } else if (event.key.toLowerCase() === 'u') {
+        saveLabel(false, true).catch((error) => setStatus(error.message, 'error'));
+      } else if (event.key === '1') {
+        els.lineRange.value = 13;
+        updateRangeDisplay();
+        saveLabel(true, true).catch((error) => setStatus(error.message, 'error'));
+      } else if (event.key === '2') {
+        els.lineRange.value = 38;
+        updateRangeDisplay();
+        saveLabel(true, true).catch((error) => setStatus(error.message, 'error'));
+      } else if (event.key === '3') {
+        els.lineRange.value = 63;
+        updateRangeDisplay();
+        saveLabel(true, true).catch((error) => setStatus(error.message, 'error'));
+      } else if (event.key === '4') {
+        els.lineRange.value = 88;
+        updateRangeDisplay();
+        saveLabel(true, true).catch((error) => setStatus(error.message, 'error'));
+      }
+    });
+
+    updateRangeDisplay();
+    loadDataset().catch((error) => setStatus(error.message, 'error'));
+  </script>
+</body>
+</html>

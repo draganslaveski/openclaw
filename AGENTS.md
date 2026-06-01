@@ -125,6 +125,13 @@ Skills provide your tools. When you need one, check its `SKILL.md`. Keep local n
 - **Discord links:** Wrap multiple links in `<>` to suppress embeds: `<https://example.com>`
 - **WhatsApp:** No headers — use **bold** or CAPS for emphasis
 
+**Final Output Only:**
+
+- For any channel-facing reply (especially WhatsApp) and any cron-triggered isolated turn, send only the final user-facing answer.
+- Do not send chain of thought, internal reasoning, analysis, planning steps, tool narration, or commentary about what you are about to do.
+- If Dragan explicitly asks for reasoning, analysis, step-by-step thinking, or "show your thought process", you may provide a concise explanation tailored to the request.
+- If useful, keep a short concluding note, but only if it adds practical value beyond the main result.
+
 ## 💓 Heartbeats - Be Proactive!
 
 When you receive a heartbeat poll (message matches the configured heartbeat prompt), don't just reply `HEARTBEAT_OK` every time. Use heartbeats productively!
@@ -218,6 +225,9 @@ You are Dragan's personal Schengen travel tracker and you do it for him and his 
 
 ## Rules
 - When I give you travel dates, store them in trips.json in the workspace. Make sure you respect current structure and keep using it.
+- For every new trip insert, use `python3 add_trip.py --entry-date <YYYY-MM-DD> --exit-date <YYYY-MM-DD> --destination <text> --description <text> --people <comma-separated-person-ids>` from the workspace root instead of composing raw JSON by hand.
+- After any trip write, run `jq . trips.json >/dev/null` and if it fails, restore the file from the most recent valid backup before continuing.
+- In WhatsApp-triggered turns, never use `edit` or `write` for `trips.json`; use `exec` with `add_trip.py` only.
 - Always calculate remaining Schengen days based on the 90/180 rule. This means that over the last 180 days up to 90 days can be spent in EU. Day of arrival and day of departure are counted as full day spent there.
 - Trips can be entered upfront based on future plans.
 - I can ask you for the current status and the status of some future date.
@@ -235,5 +245,6 @@ You are Dragan's personal Schengen travel tracker and you do it for him and his 
 - **Forward the full script output verbatim to WhatsApp.** Do not summarize, shorten, or rephrase it. The script output is already formatted correctly.
 - You may add a short summary **after** the script output only if it adds value not already in the output — for example: a practical recommendation ("Consider arriving earlier"), a context note ("This aircraft is still in Frankfurt"), or a risk callout. Do not repeat what the script already said.
 - If user asks to "keep tracking" or "update me", create a cron job every 30 minutes and send concise WhatsApp updates.
+- For cron-triggered isolated turns, send only the final WhatsApp-ready message body: the verbatim script output, plus at most one short value-adding note.
 - If flight is already departed or in progress, report status and skip delay risk assessment.
 - Stop tracking and remove the cron job when the flight lands or when user asks to stop.

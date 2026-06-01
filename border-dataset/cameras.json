@@ -1,0 +1,49 @@
+{
+  "cameras": [
+    {
+      "id": "hak_bajakovo_entry",
+      "name": "Bajakovo Entry",
+      "provider": "HAK",
+      "type": "jpeg_snapshot",
+      "url": "https://m.hak.hr/cam.asp?id=2",
+      "enabled": true,
+      "notes": "Source page: https://m.hak.hr/kamera.asp?g=2&k=1 (1st camera: Ulaz u HR iz SRB)."
+    },
+    {
+      "id": "hak_bajakovo_exit_1",
+      "name": "Bajakovo Exit 1",
+      "provider": "HAK",
+      "type": "jpeg_snapshot",
+      "url": "https://m.hak.hr/cam.asp?id=1",
+      "enabled": true,
+      "notes": "Source page: https://m.hak.hr/kamera.asp?g=2&k=1 (2nd camera: Izlaz iz HR u SRB)."
+    },
+    {
+      "id": "hak_bajakovo_exit_2",
+      "name": "Bajakovo Exit 2",
+      "provider": "HAK",
+      "type": "jpeg_snapshot",
+      "url": "https://m.hak.hr/cam.asp?id=3",
+      "enabled": true,
+      "notes": "Source page: https://m.hak.hr/kamera.asp?g=2&k=1 (3rd camera: Izlaz iz HR u SRB)."
+    },
+    {
+      "id": "hak_tovarnik_exit",
+      "name": "Tovarnik Exit",
+      "provider": "HAK",
+      "type": "jpeg_snapshot",
+      "url": "https://m.hak.hr/cam.asp?id=419",
+      "enabled": true,
+      "notes": "Source page: https://m.hak.hr/kamera.asp?g=2&k=196 (1st camera: Izlaz iz HR u SRB)."
+    },
+    {
+      "id": "hak_tovarnik_entry",
+      "name": "Tovarnik Entry",
+      "provider": "HAK",
+      "type": "jpeg_snapshot",
+      "url": "https://m.hak.hr/cam.asp?id=420",
+      "enabled": true,
+      "notes": "Source page: https://m.hak.hr/kamera.asp?g=2&k=196 (2nd camera: Ulaz u HR iz SRB)."
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "location": "Erdevik, Serbia",
+  "checkDate": "2026-04-08T05:00:00Z",
+  "checkLocal": "Wednesday, April 8th, 2026 - 7:00 AM",
+  "availableForecast": {
+    "April8": {
+      "avgTemp": 10,
+      "maxTemp": 14,
+      "minTemp": 6,
+      "condition": "Clear/Sunny",
+      "rain": "No",
+      "windSpeedKmph": 15
+    },
+    "April9": {
+      "avgTemp": 8,
+      "maxTemp": 12,
+      "minTemp": 3,
+      "condition": "Partly Cloudy, patchy rain possible midday",
+      "rain": "Possible (84% chance at 12:00)",
+      "windSpeedKmph": 17
+    },
+    "April10": {
+      "avgTemp": 7,
+      "maxTemp": 12,
+      "minTemp": 2,
+      "condition": "Clear/Partly Cloudy",
+      "rain": "No",
+      "windSpeedKmph": 14
+    }
+  },
+  "futureWeekends": {
+    "april11-14": {
+      "status": "Out of current forecast range (5-day limit). Recheck on April 8 evening for 11-14 april weekend.",
+      "nextCheck": "2026-04-08T18:00:00Z"
+    },
+    "april25-28": {
+      "status": "Too far ahead. Recheck after April 19.",
+      "nextCheck": "2026-04-19T00:00:00Z"
+    },
+    "april30-may4": {
+      "status": "Too far ahead. Recheck after April 24.",
+      "nextCheck": "2026-04-24T00:00:00Z"
+    }
+  },
+  "notes": "API provides max 5 days. Setting up reminders to check future weekends closer to dates. No changes to report yet (baseline establishment only)."
+}
