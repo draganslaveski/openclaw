@@ -27,7 +27,8 @@ Notes:
 - You can use camera names (preferred), camera ids, or `all`.
 - Default camera is `Bajakovo Entry`.
 - The latest available model is auto-selected (current_queue_model.pt, fallback queue_model_best.joblib).
-- For status responses, include only the saved snapshot file path (no URL).
+- For status responses, return concise queue status only.
+- Do not include snapshot file path in user-facing response unless explicitly requested.
 
 ## Flow 2: Border Monitoring (Interval)
 Use this when user asks to keep monitoring a border camera periodically.
