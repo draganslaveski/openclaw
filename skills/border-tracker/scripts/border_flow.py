@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import re
+import shlex
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import joblib
+import numpy as np
+import requests
+from PIL import Image
+from skimage.feature import hog
+
+LABELS = ["light", "medium", "high", "extreme"]
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def safe_name(text: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]+", "-", text.strip()).strip("-") or "unknown"
+
+
+def _norm(text: str) -> str:
+    return text.strip().lower()
+
+
+def load_cameras(cameras_file: Path, camera_selector: str) -> list[dict[str, Any]]:
+    data = json.loads(cameras_file.read_text(encoding="utf-8"))
+    cameras = [c for c in data.get("cameras", []) if c.get("enabled", True)]
+    selector = _norm(camera_selector)
+    if selector == "all":
+        return cameras
+
+    by_id = [c for c in cameras if _norm(str(c.get("id", ""))) == selector]
+    if by_id:
+        return by_id
+
+    by_name = [c for c in cameras if _norm(str(c.get("name", ""))) == selector]
+    if by_name:
+        return by_name
+
+    # Allow convenient partial name matching if unambiguous.
+    partial = [c for c in cameras if selector in _norm(str(c.get("name", "")))]
+    if len(partial) == 1:
+        return partial
+    if len(partial) > 1:
+        names = ", ".join(str(c.get("name", c.get("id", "unknown"))) for c in partial)
+        raise SystemExit(f"Camera selector '{camera_selector}' matched multiple cameras: {names}")
+
+    return []
+
+
+def fetch_snapshot(url: str, timeout_sec: int) -> Image.Image:
+    response = requests.get(url, timeout=timeout_sec, headers={"User-Agent": "BorderFlow/1.0"})
+    response.raise_for_status()
+    with Image.open(io.BytesIO(response.content)) as tmp:
+        return tmp.convert("RGB")
+
+
+def to_hog_feature(image: Image.Image) -> np.ndarray:
+    gray = image.convert("L")
+    arr = np.asarray(gray.resize((96, 48), Image.Resampling.BILINEAR), dtype=np.float32) / 255.0
+    vec = hog(
+        arr,
+        orientations=9,
+        pixels_per_cell=(8, 8),
+        cells_per_block=(2, 2),
+        block_norm="L2-Hys",
+        feature_vector=True,
+    )
+    return vec.astype(np.float32)
+
+
+@dataclass
+class Prediction:
+    label: str
+    score: float | None
+    model_name: str
+
+
+class QueuePredictor:
+    def __init__(self, model_root: Path):
+        self.model_root = model_root
+        self.joblib_model_path = model_root / "queue_model_best.joblib"
+        self.torch_model_path = model_root / "current_queue_model.pt"
+        self._mode = "none"
+        self._joblib_model = None
+        self._torch_model = None
+        self._torch_device = None
+
+        self._try_load_torch_model()
+        if self._mode == "none":
+            self._try_load_joblib_model()
+
+    def _try_load_torch_model(self) -> None:
+        if not self.torch_model_path.exists():
+            return
+        try:
+            import torch
+            from torchvision import models
+
+            ckpt = torch.load(self.torch_model_path, map_location="cpu")
+            model = models.resnet18(weights=None)
+            in_features = model.fc.in_features
+            model.fc = torch.nn.Linear(in_features, 4)
+            model.load_state_dict(ckpt["state_dict"])
+            model.eval()
+
+            self._torch_model = model
+            self._torch_device = torch.device("cpu")
+            self._mode = "torch"
+        except Exception:
+            self._mode = "none"
+
+    def _try_load_joblib_model(self) -> None:
+        if not self.joblib_model_path.exists():
+            return
+        self._joblib_model = joblib.load(self.joblib_model_path)
+        self._mode = "joblib"
+
+    def available(self) -> bool:
+        return self._mode in {"torch", "joblib"}
+
+    def predict(self, image: Image.Image) -> Prediction:
+        if self._mode == "torch":
+            return self._predict_torch(image)
+        if self._mode == "joblib":
+            return self._predict_joblib(image)
+        raise RuntimeError("No model available. Expected current_queue_model.pt or queue_model_best.joblib")
+
+    def _predict_joblib(self, image: Image.Image) -> Prediction:
+        x = to_hog_feature(image).reshape(1, -1)
+        pred = int(self._joblib_model.predict(x)[0])
+        score = None
+        if hasattr(self._joblib_model, "decision_function"):
+            raw = self._joblib_model.decision_function(x)
+            if isinstance(raw, np.ndarray):
+                score = float(np.max(raw))
+        return Prediction(label=LABELS[pred], score=score, model_name="queue_model_best.joblib")
+
+    def _predict_torch(self, image: Image.Image) -> Prediction:
+        import torch
+
+        arr = np.asarray(image.resize((160, 160), Image.Resampling.BILINEAR), dtype=np.float32) / 255.0
+        arr = arr.transpose(2, 0, 1)
+        mean = np.asarray([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+        std = np.asarray([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
+        arr = (arr - mean) / std
+        x = torch.from_numpy(arr).unsqueeze(0)
+
+        with torch.no_grad():
+            logits = self._torch_model(x)
+            probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+            pred = int(np.argmax(probs))
+            score = float(np.max(probs))
+
+        return Prediction(label=LABELS[pred], score=score, model_name="current_queue_model.pt")
+
+
+def append_history(history_file: Path, row: dict[str, Any]) -> None:
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    with history_file.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=True) + "\n")
+
+
+def run_status(args: argparse.Namespace) -> int:
+    cameras = load_cameras(args.cameras_file, args.camera)
+    if not cameras:
+        raise SystemExit(f"No enabled cameras matched camera={args.camera}")
+
+    predictor = QueuePredictor(args.models_dir)
+    if not predictor.available():
+        raise SystemExit("No model file found in models dir")
+
+    results: list[dict[str, Any]] = []
+    for cam in cameras:
+        cam_id = str(cam["id"])
+        cam_name = str(cam.get("name", cam_id))
+        url = str(cam["url"])
+        captured_at = now_iso()
+        try:
+            image = fetch_snapshot(url, args.timeout_sec)
+            pred = predictor.predict(image)
+            row = {
+                "captured_at": captured_at,
+                "camera_id": cam_id,
+                "camera_name": cam_name,
+                "url": url,
+                "status": "ok",
+                "line_bucket": pred.label,
+                "score": pred.score,
+                "model": pred.model_name,
+                "flow": args.flow_name,
+            }
+            results.append(row)
+            if args.history_file:
+                append_history(args.history_file, row)
+            if args.save_debug_dir:
+                args.save_debug_dir.mkdir(parents=True, exist_ok=True)
+                out = args.save_debug_dir / f"{safe_name(cam_id)}-{datetime.now().strftime('%Y%m%dT%H%M%S')}.jpg"
+                image.save(out, format="JPEG", quality=90)
+                row["snapshot_file"] = str(out)
+        except Exception as exc:
+            row = {
+                "captured_at": captured_at,
+                "camera_id": cam_id,
+                "camera_name": cam_name,
+                "url": url,
+                "status": "error",
+                "error": str(exc),
+                "flow": args.flow_name,
+            }
+            results.append(row)
+            if args.history_file:
+                append_history(args.history_file, row)
+
+    ok = [r for r in results if r["status"] == "ok"]
+    err = [r for r in results if r["status"] == "error"]
+    print(f"BORDER STATUS ({args.flow_name})")
+    print(f"Checked: {len(results)} camera(s), ok={len(ok)}, error={len(err)}")
+    for row in ok:
+        score_txt = "" if row.get("score") is None else f" ({row['score']:.3f})"
+        print(f"- {row['camera_name']} [{row['camera_id']}]: {row['line_bucket']}{score_txt}")
+        if row.get("snapshot_file"):
+            print(f"  snapshot_file: {row['snapshot_file']}")
+        else:
+            print("  snapshot_file: (not saved; run with --save-debug-dir)")
+    for row in err:
+        print(f"- {row['camera_name']} [{row['camera_id']}]: ERROR - {row['error']}")
+
+    if args.output_json:
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "generated_at": now_iso(),
+            "flow": args.flow_name,
+            "camera": args.camera,
+            "results": results,
+        }
+        args.output_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return 0 if ok else 1
+
+
+def run_patterns(args: argparse.Namespace) -> int:
+    if not args.history_file.exists():
+        raise SystemExit(f"History file not found: {args.history_file}")
+
+    selected = load_cameras(args.cameras_file, args.camera)
+    if not selected:
+        raise SystemExit(f"No enabled cameras matched camera={args.camera}")
+    selected_ids = {str(c.get("id")) for c in selected}
+
+    rows: list[dict[str, Any]] = []
+    for line in args.history_file.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("status") != "ok":
+            continue
+        if str(row.get("camera_id")) not in selected_ids:
+            continue
+        rows.append(row)
+
+    if not rows:
+        print("No matching successful samples in history.")
+        return 0
+
+    by_hour: dict[int, dict[str, int]] = {}
+    total_extreme = 0
+    for row in rows:
+        ts = datetime.fromisoformat(row["captured_at"].replace("Z", "+00:00"))
+        hour = ts.hour
+        label = str(row.get("line_bucket", "unknown"))
+        by_hour.setdefault(hour, {"samples": 0, "extreme": 0})
+        by_hour[hour]["samples"] += 1
+        if label == "extreme":
+            by_hour[hour]["extreme"] += 1
+            total_extreme += 1
+
+    print("BORDER PATTERNS")
+    print(f"Camera: {args.camera}")
+    print(f"Samples: {len(rows)}, extreme samples: {total_extreme}")
+    print("Extreme by hour:")
+    for hour in sorted(by_hour):
+        samples = by_hour[hour]["samples"]
+        ext = by_hour[hour]["extreme"]
+        ratio = 100.0 * ext / max(samples, 1)
+        print(f"- {hour:02d}:00-{hour:02d}:59 -> extreme {ext}/{samples} ({ratio:.1f}%)")
+    return 0
+
+
+def run_upsert_monitor_job(args: argparse.Namespace) -> int:
+    if args.interval_min <= 0:
+        raise SystemExit("--interval-min must be a positive integer")
+
+    selected = load_cameras(args.cameras_file, args.camera)
+    if not selected:
+        raise SystemExit(f"No enabled cameras matched camera={args.camera}")
+    if len(selected) != 1:
+        raise SystemExit("Monitoring job requires exactly one camera. Use a specific camera name or id (not 'all').")
+
+    camera = selected[0]
+    camera_id = str(camera.get("id"))
+    camera_name = str(camera.get("name", camera_id))
+
+    jobs_file = args.jobs_file
+    jobs_file.parent.mkdir(parents=True, exist_ok=True)
+    if jobs_file.exists():
+        jobs = json.loads(jobs_file.read_text(encoding="utf-8"))
+    else:
+        jobs = {"version": 1, "jobs": []}
+
+    jobs.setdefault("version", 1)
+    jobs.setdefault("jobs", [])
+
+    name = f"border-monitor-{safe_name(camera_id)}-{int(args.interval_min)}m"
+    python_exe = "/home/dragan-slaveski/.openclaw/.venv/bin/python"
+    camera_arg = shlex.quote(camera_name)
+    message = (
+        "Run border-tracker monitor sample: "
+        f"{python_exe} /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py status "
+        f"--flow-name monitor --camera {camera_arg} "
+        f"--cameras-file /home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json "
+        f"--models-dir /home/dragan-slaveski/.openclaw/workspace/border-dataset/models "
+        f"--history-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl "
+        f"--output-json /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/latest_{safe_name(camera_id)}.json "
+        "and do not send any channel message; just return HEARTBEAT_OK."
+    )
+
+    entry = {
+        "name": name,
+        "enabled": True,
+        "schedule": {
+            "kind": "every",
+            "everyMs": int(args.interval_min * 60 * 1000),
+            "anchorMs": int(datetime.now(timezone.utc).timestamp() * 1000),
+        },
+        "sessionTarget": "isolated",
+        "payload": {
+            "kind": "agentTurn",
+            "message": message,
+        },
+    }
+
+    replaced = False
+    for i, job in enumerate(jobs["jobs"]):
+        if job.get("name") == name:
+            jobs["jobs"][i] = entry
+            replaced = True
+            break
+    if not replaced:
+        jobs["jobs"].append(entry)
+
+    jobs_file.write_text(json.dumps(jobs, indent=2), encoding="utf-8")
+    print(f"Upserted job: {name}")
+    print(f"Interval: every {args.interval_min} minute(s)")
+    print(f"Target camera: {camera_name} [{camera_id}]")
+    return 0
+
+
+def run_disable_monitor_job(args: argparse.Namespace) -> int:
+    selected = load_cameras(args.cameras_file, args.camera)
+    if not selected:
+        raise SystemExit(f"No enabled cameras matched camera={args.camera}")
+
+    camera_ids = {str(c.get("id")) for c in selected}
+    if "all" in {_norm(args.camera)}:
+        camera_ids = {
+            str(c.get("id"))
+            for c in load_cameras(args.cameras_file, "all")
+        }
+
+    jobs_file = args.jobs_file
+    if not jobs_file.exists():
+        print(f"Jobs file not found: {jobs_file}")
+        return 0
+
+    jobs = json.loads(jobs_file.read_text(encoding="utf-8"))
+    jobs.setdefault("jobs", [])
+
+    disabled = 0
+    for job in jobs["jobs"]:
+        name = str(job.get("name", ""))
+        if not name.startswith("border-monitor-"):
+            continue
+        for camera_id in camera_ids:
+            prefix = f"border-monitor-{safe_name(camera_id)}-"
+            if name.startswith(prefix) and job.get("enabled", True):
+                job["enabled"] = False
+                disabled += 1
+                break
+
+    jobs_file.write_text(json.dumps(jobs, indent=2), encoding="utf-8")
+    print(f"Disabled monitor job(s): {disabled}")
+    print(f"Target camera selector: {args.camera}")
+    return 0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Border tracker flow utility")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    status = sub.add_parser("status", help="Run one-shot status classification")
+    status.add_argument("--flow-name", default="status")
+    status.add_argument("--camera", default="Bajakovo Entry")
+    status.add_argument("--cameras-file", type=Path, required=True)
+    status.add_argument("--models-dir", type=Path, required=True)
+    status.add_argument("--timeout-sec", type=int, default=20)
+    status.add_argument("--history-file", type=Path)
+    status.add_argument("--output-json", type=Path)
+    status.add_argument("--save-debug-dir", type=Path)
+
+    patterns = sub.add_parser("patterns", help="Summarize patterns from history")
+    patterns.add_argument("--history-file", type=Path, required=True)
+    patterns.add_argument("--camera", default="Bajakovo Entry")
+    patterns.add_argument(
+        "--cameras-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json"),
+    )
+
+    monitor = sub.add_parser("upsert-monitor-job", help="Create/update monitoring cron entry")
+    monitor.add_argument("--camera", default="Bajakovo Entry")
+    monitor.add_argument("--interval-min", type=int, required=True)
+    monitor.add_argument(
+        "--cameras-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json"),
+    )
+    monitor.add_argument("--jobs-file", type=Path, default=Path("/home/dragan-slaveski/.openclaw/cron/jobs.json"))
+
+    disable = sub.add_parser("disable-monitor-job", help="Disable existing monitoring cron entry/entries")
+    disable.add_argument("--camera", default="Bajakovo Entry")
+    disable.add_argument(
+        "--cameras-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json"),
+    )
+    disable.add_argument("--jobs-file", type=Path, default=Path("/home/dragan-slaveski/.openclaw/cron/jobs.json"))
+
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.cmd == "status":
+        return run_status(args)
+    if args.cmd == "patterns":
+        return run_patterns(args)
+    if args.cmd == "upsert-monitor-job":
+        return run_upsert_monitor_job(args)
+    if args.cmd == "disable-monitor-job":
+        return run_disable_monitor_job(args)
+    raise SystemExit(f"Unknown command: {args.cmd}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
