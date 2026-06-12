@@ -171,6 +171,12 @@ def append_history(history_file: Path, row: dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=True) + "\n")
 
 
+def append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=True) + "\n")
+
+
 def run_status(args: argparse.Namespace) -> int:
     cameras = load_cameras(args.cameras_file, args.camera)
     if not cameras:
@@ -248,28 +254,131 @@ def run_status(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def run_patterns(args: argparse.Namespace) -> int:
-    if not args.history_file.exists():
-        raise SystemExit(f"History file not found: {args.history_file}")
+def run_capture_snapshot(args: argparse.Namespace) -> int:
+    cameras = load_cameras(args.cameras_file, args.camera)
+    if not cameras:
+        raise SystemExit(f"No enabled cameras matched camera={args.camera}")
 
+    args.snapshots_dir.mkdir(parents=True, exist_ok=True)
+
+    results: list[dict[str, Any]] = []
+    for cam in cameras:
+        cam_id = str(cam["id"])
+        cam_name = str(cam.get("name", cam_id))
+        url = str(cam["url"])
+        captured_at = now_iso()
+
+        try:
+            image = fetch_snapshot(url, args.timeout_sec)
+            out = args.snapshots_dir / f"{safe_name(cam_id)}-{datetime.now().strftime('%Y%m%dT%H%M%S')}.jpg"
+            image.save(out, format="JPEG", quality=90)
+
+            row = {
+                "captured_at": captured_at,
+                "camera_id": cam_id,
+                "camera_name": cam_name,
+                "url": url,
+                "status": "ok",
+                "snapshot_file": str(out),
+                "flow": args.flow_name,
+            }
+            results.append(row)
+            if args.snapshot_index_file:
+                append_jsonl(args.snapshot_index_file, row)
+        except Exception as exc:
+            row = {
+                "captured_at": captured_at,
+                "camera_id": cam_id,
+                "camera_name": cam_name,
+                "url": url,
+                "status": "error",
+                "error": str(exc),
+                "flow": args.flow_name,
+            }
+            results.append(row)
+            if args.snapshot_index_file:
+                append_jsonl(args.snapshot_index_file, row)
+
+    ok = [r for r in results if r["status"] == "ok"]
+    err = [r for r in results if r["status"] == "error"]
+    print(f"BORDER SNAPSHOT CAPTURE ({args.flow_name})")
+    print(f"Checked: {len(results)} camera(s), ok={len(ok)}, error={len(err)}")
+    for row in ok:
+        print(f"- {row['camera_name']} [{row['camera_id']}]: snapshot_file: {row['snapshot_file']}")
+    for row in err:
+        print(f"- {row['camera_name']} [{row['camera_id']}]: ERROR - {row['error']}")
+
+    if args.output_json:
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "generated_at": now_iso(),
+            "flow": args.flow_name,
+            "camera": args.camera,
+            "results": results,
+        }
+        args.output_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return 0 if ok else 1
+
+
+def run_patterns(args: argparse.Namespace) -> int:
     selected = load_cameras(args.cameras_file, args.camera)
     if not selected:
         raise SystemExit(f"No enabled cameras matched camera={args.camera}")
     selected_ids = {str(c.get("id")) for c in selected}
 
     rows: list[dict[str, Any]] = []
-    for line in args.history_file.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        if row.get("status") != "ok":
-            continue
-        if str(row.get("camera_id")) not in selected_ids:
-            continue
-        rows.append(row)
+    history_rows = 0
+    if args.history_file and args.history_file.exists():
+        for line in args.history_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("status") != "ok":
+                continue
+            if str(row.get("camera_id")) not in selected_ids:
+                continue
+            if not row.get("line_bucket"):
+                continue
+            rows.append(row)
+            history_rows += 1
+
+    inferred_rows = 0
+    if args.snapshot_index_file and args.snapshot_index_file.exists():
+        predictor = QueuePredictor(args.models_dir)
+        if predictor.available():
+            for line in args.snapshot_index_file.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if row.get("status") != "ok":
+                    continue
+                if str(row.get("camera_id")) not in selected_ids:
+                    continue
+                snapshot_path = Path(str(row.get("snapshot_file", "")))
+                if not snapshot_path.exists():
+                    continue
+                try:
+                    with Image.open(snapshot_path) as img:
+                        pred = predictor.predict(img.convert("RGB"))
+                    rows.append(
+                        {
+                            "captured_at": row.get("captured_at", now_iso()),
+                            "camera_id": row.get("camera_id"),
+                            "camera_name": row.get("camera_name"),
+                            "status": "ok",
+                            "line_bucket": pred.label,
+                            "score": pred.score,
+                            "model": pred.model_name,
+                            "source": "snapshot_inference",
+                            "snapshot_file": str(snapshot_path),
+                        }
+                    )
+                    inferred_rows += 1
+                except Exception:
+                    continue
 
     if not rows:
-        print("No matching successful samples in history.")
+        print("No matching samples for patterns (history or snapshot inference).")
         return 0
 
     by_hour: dict[int, dict[str, int]] = {}
@@ -286,6 +395,7 @@ def run_patterns(args: argparse.Namespace) -> int:
 
     print("BORDER PATTERNS")
     print(f"Camera: {args.camera}")
+    print(f"Data sources: history={history_rows}, inferred_from_snapshots={inferred_rows}")
     print(f"Samples: {len(rows)}, extreme samples: {total_extreme}")
     print("Extreme by hour:")
     for hour in sorted(by_hour):
@@ -322,16 +432,24 @@ def run_upsert_monitor_job(args: argparse.Namespace) -> int:
 
     name = f"border-monitor-{safe_name(camera_id)}-{int(args.interval_min)}m"
     python_exe = "/home/dragan-slaveski/.openclaw/.venv/bin/python"
-    camera_arg = shlex.quote(camera_name)
-    message = (
-        "Run border-tracker monitor sample: "
-        f"{python_exe} /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py status "
-        f"--flow-name monitor --camera {camera_arg} "
-        f"--cameras-file /home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json "
-        f"--models-dir /home/dragan-slaveski/.openclaw/workspace/border-dataset/models "
-        f"--history-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl "
-        f"--output-json /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/latest_{safe_name(camera_id)}.json "
-        "and do not send any channel message; just return HEARTBEAT_OK."
+    command = " ".join(
+        [
+            shlex.quote(python_exe),
+            "/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py",
+            "capture-snapshot",
+            "--flow-name",
+            "monitor",
+            "--camera",
+            shlex.quote(camera_name),
+            "--cameras-file",
+            "/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json",
+            "--snapshots-dir",
+            "/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshots",
+            "--snapshot-index-file",
+            "/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl",
+            "--output-json",
+            f"/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/latest_capture_{safe_name(camera_id)}.json",
+        ]
     )
 
     entry = {
@@ -344,8 +462,10 @@ def run_upsert_monitor_job(args: argparse.Namespace) -> int:
         },
         "sessionTarget": "isolated",
         "payload": {
-            "kind": "agentTurn",
-            "message": message,
+            "kind": "exec",
+            "command": command,
+            "cwd": "/home/dragan-slaveski/.openclaw/workspace",
+            "timeoutMs": 60000,
         },
     }
 
@@ -362,6 +482,7 @@ def run_upsert_monitor_job(args: argparse.Namespace) -> int:
     print(f"Upserted job: {name}")
     print(f"Interval: every {args.interval_min} minute(s)")
     print(f"Target camera: {camera_name} [{camera_id}]")
+    print("Mode: local exec snapshot capture (no LLM)")
     return 0
 
 
@@ -417,13 +538,36 @@ def parse_args() -> argparse.Namespace:
     status.add_argument("--output-json", type=Path)
     status.add_argument("--save-debug-dir", type=Path)
 
+    capture = sub.add_parser("capture-snapshot", help="Capture snapshots only (no model inference)")
+    capture.add_argument("--flow-name", default="monitor")
+    capture.add_argument("--camera", default="Bajakovo Entry")
+    capture.add_argument("--cameras-file", type=Path, required=True)
+    capture.add_argument("--timeout-sec", type=int, default=20)
+    capture.add_argument("--snapshots-dir", type=Path, required=True)
+    capture.add_argument("--snapshot-index-file", type=Path)
+    capture.add_argument("--output-json", type=Path)
+
     patterns = sub.add_parser("patterns", help="Summarize patterns from history")
-    patterns.add_argument("--history-file", type=Path, required=True)
+    patterns.add_argument(
+        "--history-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl"),
+    )
     patterns.add_argument("--camera", default="Bajakovo Entry")
     patterns.add_argument(
         "--cameras-file",
         type=Path,
         default=Path("/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json"),
+    )
+    patterns.add_argument(
+        "--models-dir",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/border-dataset/models"),
+    )
+    patterns.add_argument(
+        "--snapshot-index-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl"),
     )
 
     monitor = sub.add_parser("upsert-monitor-job", help="Create/update monitoring cron entry")
@@ -452,6 +596,8 @@ def main() -> int:
     args = parse_args()
     if args.cmd == "status":
         return run_status(args)
+    if args.cmd == "capture-snapshot":
+        return run_capture_snapshot(args)
     if args.cmd == "patterns":
         return run_patterns(args)
     if args.cmd == "upsert-monitor-job":
