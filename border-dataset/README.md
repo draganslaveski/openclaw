@@ -43,3 +43,21 @@ http://127.0.0.1:8765
 - Use `Save + next` for usable frames
 - Use `Mark unusable` for blocked, broken, or irrelevant frames
 - Use the labels JSONL later to build train/validation/test splits for modeling
+
+## Prevent sleep during training
+
+On Linux, run training through the provided wrapper so the PC does not go to sleep while training is active:
+
+```bash
+./workspace/border-dataset/run_training_no_sleep.sh /home/dragan-slaveski/.openclaw/.venv/bin/python workspace/border-dataset/train_queue_fast.py
+```
+
+You can wrap any training command the same way. Sleep blocking is released automatically when the command exits.
+
+If your system policy denies sleep inhibition in this shell, run strict mode to fail fast:
+
+```bash
+REQUIRE_INHIBIT=1 ./workspace/border-dataset/run_training_no_sleep.sh /home/dragan-slaveski/.openclaw/.venv/bin/python workspace/border-dataset/train_queue_fast.py
+```
+
+If strict mode fails with access denied, run the same command from your local logged-in desktop terminal (or with `sudo` if your machine policy requires it).

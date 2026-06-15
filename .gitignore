@@ -21,3 +21,8 @@ skills/flight-tracker/venv/
 skills/*/venv/
 **/__pycache__/
 **/*.pyc
+
+# Border tracker / dataset generated artifacts
+border-dataset/data/raw/
+border-dataset/models/
+skills/border-tracker/state/
