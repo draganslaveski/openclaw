@@ -4,7 +4,7 @@ description: Check border camera queue status and run interval monitoring flows 
 metadata:
   openclaw:
     requires:
-      bins: ["python3"]
+      bins: ["python3", "crontab"]
 ---
 
 ## Flow 1: Border Status (One-shot)
@@ -35,19 +35,18 @@ Use this when user asks to keep monitoring a border camera periodically.
 
 Monitoring must use local snapshot capture only (no LLM summarization on each run).
 
-1. Create or update cron job:
+1. Create or update Linux system cron job:
 
 ```bash
-python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py upsert-monitor-job \
+python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py upsert-system-cron \
   --camera "Bajakovo Entry" \
-  --interval-min 30 \
-  --jobs-file /home/dragan-slaveski/.openclaw/cron/jobs.json
+  --interval-min 30
 ```
 
 2. Confirm to user that periodic monitoring is enabled.
 
 What gets scheduled:
-- A regular cron runner entry with local `exec` payload.
+- A Linux crontab entry for the current user.
 - It runs `capture-snapshot` and writes snapshots to `workspace/skills/border-tracker/state/snapshots`.
 - It appends capture metadata to `workspace/skills/border-tracker/state/snapshot_index.jsonl`.
 - No per-run channel message should be sent.
@@ -58,14 +57,40 @@ Use this when user asks to stop monitoring for a camera.
 Run:
 
 ```bash
-python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py disable-monitor-job \
-  --camera "Bajakovo Entry" \
-  --jobs-file /home/dragan-slaveski/.openclaw/cron/jobs.json
+python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py disable-system-cron \
+  --camera "Bajakovo Entry"
 ```
 
 Notes:
-- This disables existing `border-monitor-*` jobs for the selected camera.
-- Use `--camera all` to disable all border monitor jobs.
+- This disables existing system cron entries tagged for the selected camera.
+- Use `--camera all` to disable all border monitor cron entries.
+
+## WhatsApp Intent Routing (Start/Stop)
+For WhatsApp messages, map intents directly to system cron commands:
+
+- Start monitoring intents (examples: "start monitoring", "monitor every 30 min", "enable border monitoring"):
+
+```bash
+python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py upsert-system-cron \
+  --camera "Bajakovo Entry" \
+  --interval-min 30
+```
+
+- Stop monitoring intents (examples: "stop monitoring", "disable border monitoring", "stop 30-min checks"):
+
+```bash
+python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py disable-system-cron \
+  --camera "Bajakovo Entry"
+```
+
+- Stop all monitoring intents (examples: "stop all border monitoring"):
+
+```bash
+python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py disable-system-cron \
+  --camera all
+```
+
+Always confirm to the user whether monitoring is now enabled or disabled.
 
 ## Pattern Query (Later)
 When user asks for observed patterns, run local model inference over saved snapshots first, then summarize:

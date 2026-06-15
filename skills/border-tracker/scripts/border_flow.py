@@ -6,6 +6,7 @@ import io
 import json
 import re
 import shlex
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ from PIL import Image
 from skimage.feature import hog
 
 LABELS = ["light", "medium", "high", "extreme"]
+SYSTEM_CRON_TAG_PREFIX = "OPENCLAW_BORDER_MONITOR"
 
 
 def now_iso() -> str:
@@ -30,6 +32,61 @@ def safe_name(text: str) -> str:
 
 def _norm(text: str) -> str:
     return text.strip().lower()
+
+
+def _build_capture_command(camera_name: str, camera_id: str) -> str:
+    python_exe = "/home/dragan-slaveski/.openclaw/.venv/bin/python"
+    return " ".join(
+        [
+            shlex.quote(python_exe),
+            "/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py",
+            "capture-snapshot",
+            "--flow-name",
+            "monitor",
+            "--camera",
+            shlex.quote(camera_name),
+            "--cameras-file",
+            "/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json",
+            "--snapshots-dir",
+            "/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshots",
+            "--snapshot-index-file",
+            "/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl",
+            "--output-json",
+            f"/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/latest_capture_{safe_name(camera_id)}.json",
+        ]
+    )
+
+
+def _load_user_crontab_lines() -> list[str]:
+    proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    if proc.returncode == 0:
+        text = proc.stdout
+    else:
+        stderr = (proc.stderr or "").lower()
+        if "no crontab" in stderr:
+            return []
+        raise SystemExit(f"Failed to read user crontab: {proc.stderr.strip() or 'unknown error'}")
+    return text.splitlines()
+
+
+def _write_user_crontab_lines(lines: list[str]) -> None:
+    text = "\n".join(lines).rstrip("\n") + "\n"
+    proc = subprocess.run(["crontab", "-"], input=text, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise SystemExit(f"Failed to update user crontab: {proc.stderr.strip() or 'unknown error'}")
+
+
+def _system_cron_tag_for_camera(camera_id: str) -> str:
+    return f"{SYSTEM_CRON_TAG_PREFIX}:{safe_name(camera_id)}"
+
+
+def _strip_system_cron_entries(lines: list[str], tag_markers: set[str]) -> list[str]:
+    kept: list[str] = []
+    for line in lines:
+        if any(marker in line for marker in tag_markers):
+            continue
+        kept.append(line)
+    return kept
 
 
 def load_cameras(cameras_file: Path, camera_selector: str) -> list[dict[str, Any]]:
@@ -431,26 +488,7 @@ def run_upsert_monitor_job(args: argparse.Namespace) -> int:
     jobs.setdefault("jobs", [])
 
     name = f"border-monitor-{safe_name(camera_id)}-{int(args.interval_min)}m"
-    python_exe = "/home/dragan-slaveski/.openclaw/.venv/bin/python"
-    command = " ".join(
-        [
-            shlex.quote(python_exe),
-            "/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py",
-            "capture-snapshot",
-            "--flow-name",
-            "monitor",
-            "--camera",
-            shlex.quote(camera_name),
-            "--cameras-file",
-            "/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json",
-            "--snapshots-dir",
-            "/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshots",
-            "--snapshot-index-file",
-            "/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl",
-            "--output-json",
-            f"/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/latest_capture_{safe_name(camera_id)}.json",
-        ]
-    )
+    command = _build_capture_command(camera_name, camera_id)
 
     entry = {
         "name": name,
@@ -460,7 +498,7 @@ def run_upsert_monitor_job(args: argparse.Namespace) -> int:
             "everyMs": int(args.interval_min * 60 * 1000),
             "anchorMs": int(datetime.now(timezone.utc).timestamp() * 1000),
         },
-        "sessionTarget": "isolated",
+        "sessionTarget": "background",
         "payload": {
             "kind": "exec",
             "command": command,
@@ -483,6 +521,38 @@ def run_upsert_monitor_job(args: argparse.Namespace) -> int:
     print(f"Interval: every {args.interval_min} minute(s)")
     print(f"Target camera: {camera_name} [{camera_id}]")
     print("Mode: local exec snapshot capture (no LLM)")
+    return 0
+
+
+def run_upsert_system_cron(args: argparse.Namespace) -> int:
+    if args.interval_min <= 0:
+        raise SystemExit("--interval-min must be a positive integer")
+    if args.interval_min > 59:
+        raise SystemExit("--interval-min must be <= 59 for Linux crontab minute scheduling")
+
+    selected = load_cameras(args.cameras_file, args.camera)
+    if not selected:
+        raise SystemExit(f"No enabled cameras matched camera={args.camera}")
+    if len(selected) != 1:
+        raise SystemExit("System cron monitoring requires exactly one camera. Use a specific camera name or id (not 'all').")
+
+    camera = selected[0]
+    camera_id = str(camera.get("id"))
+    camera_name = str(camera.get("name", camera_id))
+
+    command = _build_capture_command(camera_name, camera_id)
+    cron_tag = _system_cron_tag_for_camera(camera_id)
+    cron_line = f"*/{int(args.interval_min)} * * * * {command} # {cron_tag}"
+
+    current = _load_user_crontab_lines()
+    cleaned = _strip_system_cron_entries(current, {cron_tag})
+    cleaned.append(cron_line)
+    _write_user_crontab_lines(cleaned)
+
+    print(f"Upserted system cron entry: {cron_tag}")
+    print(f"Interval: every {args.interval_min} minute(s)")
+    print(f"Target camera: {camera_name} [{camera_id}]")
+    print("Mode: Linux crontab local exec snapshot capture (no LLM)")
     return 0
 
 
@@ -520,6 +590,26 @@ def run_disable_monitor_job(args: argparse.Namespace) -> int:
 
     jobs_file.write_text(json.dumps(jobs, indent=2), encoding="utf-8")
     print(f"Disabled monitor job(s): {disabled}")
+    print(f"Target camera selector: {args.camera}")
+    return 0
+
+
+def run_disable_system_cron(args: argparse.Namespace) -> int:
+    selected = load_cameras(args.cameras_file, args.camera)
+    if not selected and _norm(args.camera) != "all":
+        raise SystemExit(f"No enabled cameras matched camera={args.camera}")
+
+    if _norm(args.camera) == "all":
+        markers = {SYSTEM_CRON_TAG_PREFIX}
+    else:
+        markers = {_system_cron_tag_for_camera(str(c.get("id"))) for c in selected}
+
+    current = _load_user_crontab_lines()
+    cleaned = _strip_system_cron_entries(current, markers)
+    removed = len(current) - len(cleaned)
+    _write_user_crontab_lines(cleaned)
+
+    print(f"Disabled system cron monitor entry/entries: {removed}")
     print(f"Target camera selector: {args.camera}")
     return 0
 
@@ -580,6 +670,15 @@ def parse_args() -> argparse.Namespace:
     )
     monitor.add_argument("--jobs-file", type=Path, default=Path("/home/dragan-slaveski/.openclaw/cron/jobs.json"))
 
+    monitor_system = sub.add_parser("upsert-system-cron", help="Create/update Linux crontab monitoring entry")
+    monitor_system.add_argument("--camera", default="Bajakovo Entry")
+    monitor_system.add_argument("--interval-min", type=int, required=True)
+    monitor_system.add_argument(
+        "--cameras-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json"),
+    )
+
     disable = sub.add_parser("disable-monitor-job", help="Disable existing monitoring cron entry/entries")
     disable.add_argument("--camera", default="Bajakovo Entry")
     disable.add_argument(
@@ -588,6 +687,14 @@ def parse_args() -> argparse.Namespace:
         default=Path("/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json"),
     )
     disable.add_argument("--jobs-file", type=Path, default=Path("/home/dragan-slaveski/.openclaw/cron/jobs.json"))
+
+    disable_system = sub.add_parser("disable-system-cron", help="Disable Linux crontab monitoring entry/entries")
+    disable_system.add_argument("--camera", default="Bajakovo Entry")
+    disable_system.add_argument(
+        "--cameras-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json"),
+    )
 
     return parser.parse_args()
 
@@ -602,8 +709,12 @@ def main() -> int:
         return run_patterns(args)
     if args.cmd == "upsert-monitor-job":
         return run_upsert_monitor_job(args)
+    if args.cmd == "upsert-system-cron":
+        return run_upsert_system_cron(args)
     if args.cmd == "disable-monitor-job":
         return run_disable_monitor_job(args)
+    if args.cmd == "disable-system-cron":
+        return run_disable_system_cron(args)
     raise SystemExit(f"Unknown command: {args.cmd}")
 
 
