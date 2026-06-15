@@ -107,5 +107,8 @@ This prints intervals where extreme queue predictions are more common, using:
 - existing labeled history rows when available, and
 - fresh local inference from saved snapshots.
 
+Time handling for pattern responses:
+- Hour buckets must be interpreted and reported in local machine timezone (user timezone), not UTC.
+
 Only after this local analysis should LLM be used to format/summarize the response for WhatsApp.
 Do not include snapshot links/files for patterns responses.

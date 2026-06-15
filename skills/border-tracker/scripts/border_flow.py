@@ -23,7 +23,14 @@ SYSTEM_CRON_TAG_PREFIX = "OPENCLAW_BORDER_MONITOR"
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now().astimezone().isoformat()
+
+
+def iso_to_filename_stamp(iso_ts: str) -> str:
+    ts = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return ts.strftime("%Y%m%dT%H%M%S")
 
 
 def safe_name(text: str) -> str:
@@ -268,7 +275,7 @@ def run_status(args: argparse.Namespace) -> int:
                 append_history(args.history_file, row)
             if args.save_debug_dir:
                 args.save_debug_dir.mkdir(parents=True, exist_ok=True)
-                out = args.save_debug_dir / f"{safe_name(cam_id)}-{datetime.now().strftime('%Y%m%dT%H%M%S')}.jpg"
+                out = args.save_debug_dir / f"{safe_name(cam_id)}-{iso_to_filename_stamp(captured_at)}.jpg"
                 image.save(out, format="JPEG", quality=90)
                 row["snapshot_file"] = str(out)
         except Exception as exc:
@@ -327,7 +334,7 @@ def run_capture_snapshot(args: argparse.Namespace) -> int:
 
         try:
             image = fetch_snapshot(url, args.timeout_sec)
-            out = args.snapshots_dir / f"{safe_name(cam_id)}-{datetime.now().strftime('%Y%m%dT%H%M%S')}.jpg"
+            out = args.snapshots_dir / f"{safe_name(cam_id)}-{iso_to_filename_stamp(captured_at)}.jpg"
             image.save(out, format="JPEG", quality=90)
 
             row = {
@@ -438,11 +445,17 @@ def run_patterns(args: argparse.Namespace) -> int:
         print("No matching samples for patterns (history or snapshot inference).")
         return 0
 
+    local_tz = datetime.now().astimezone().tzinfo
+    tz_label = str(local_tz) if local_tz is not None else "local"
+
     by_hour: dict[int, dict[str, int]] = {}
     total_extreme = 0
     for row in rows:
         ts = datetime.fromisoformat(row["captured_at"].replace("Z", "+00:00"))
-        hour = ts.hour
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        local_ts = ts.astimezone(local_tz)
+        hour = local_ts.hour
         label = str(row.get("line_bucket", "unknown"))
         by_hour.setdefault(hour, {"samples": 0, "extreme": 0})
         by_hour[hour]["samples"] += 1
@@ -454,7 +467,7 @@ def run_patterns(args: argparse.Namespace) -> int:
     print(f"Camera: {args.camera}")
     print(f"Data sources: history={history_rows}, inferred_from_snapshots={inferred_rows}")
     print(f"Samples: {len(rows)}, extreme samples: {total_extreme}")
-    print("Extreme by hour:")
+    print(f"Extreme by hour ({tz_label}):")
     for hour in sorted(by_hour):
         samples = by_hour[hour]["samples"]
         ext = by_hour[hour]["extreme"]
