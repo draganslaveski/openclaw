@@ -103,6 +103,12 @@ python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/
   --camera "Bajakovo Entry"
 ```
 
+Execution discipline for trend requests:
+- Always execute `patterns` in the current turn. Do not reuse earlier results or memory.
+- Execute `snapshot-summary` for the same camera/window as a data-availability cross-check.
+- If `snapshot-summary` reports `ok > 0` but patterns has `inferred_from_snapshots=0`, classify as inference/runtime issue (not "no history").
+- Include `Snapshot records in window` and `Snapshot status split` in user-facing trend summaries.
+
 This prints intervals where extreme queue predictions are more common, using:
 - existing labeled history rows when available, and
 - fresh local inference from saved snapshots.

@@ -283,6 +283,10 @@ You are Dragan's personal Schengen travel tracker and you do it for him and his 
   `/home/dragan-slaveski/.openclaw/.venv/bin/python /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py patterns --history-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl --snapshot-index-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl --models-dir /home/dragan-slaveski/.openclaw/workspace/border-dataset/models --camera <camera_name_or_id_or_all>`
 - For time-window trend requests, pass `--hours <N>` when the user specifies a window (for example "last 8h" -> `--hours 8`, "last 24 hours" -> `--hours 24`).
 - Supported trend/pattern phrases include: "trend", "pattern", "history", "when was it worst", "what was the trend for last <N>h", "last <N> hours".
+- For any trend request, always run the command in the current turn. Do not answer from memory, previous outputs, or cached narrative.
+- For any trend request, run `snapshot-summary` for the same camera/window and use it as a data-availability cross-check.
+- If `snapshot-summary` shows `ok > 0` but patterns has `inferred_from_snapshots=0`, report this explicitly as an inference issue (model/path/runtime), not as "no history" or "single batch".
+- In trend replies, include the numeric lines `Snapshot records in window` and `Snapshot status split` from command output.
 - Patterns must be derived first via local model inference over saved snapshots/history; only then use LLM to format a concise summary.
 - Include unavailable capture count in the user-facing summary when present (from `Unavailable captures (filtered): N` in script output).
 - For patterns responses: do not include snapshot references.
