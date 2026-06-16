@@ -107,8 +107,59 @@ This prints intervals where extreme queue predictions are more common, using:
 - existing labeled history rows when available, and
 - fresh local inference from saved snapshots.
 
+Patterns output also reports unavailable captures filtered from analysis:
+- `Unavailable captures (filtered): N`
+
 Time handling for pattern responses:
 - Hour buckets must be interpreted and reported in local machine timezone (user timezone), not UTC.
 
 Only after this local analysis should LLM be used to format/summarize the response for WhatsApp.
 Do not include snapshot links/files for patterns responses.
+
+## Retroactive Unavailable Backfill
+If historical snapshots were saved before unavailable-frame filtering was added, retroactively patch statuses:
+
+```bash
+python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py backfill-unavailable \
+  --history-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl \
+  --snapshot-index-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl \
+  --snapshots-dir /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshots \
+  --apply
+```
+
+This marks matching historical rows as `status=unavailable` with reason metadata.
+
+## Unavailable Camera Query
+When user asks when camera was unavailable/downtime periods, run:
+
+```bash
+python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py unavailable-summary \
+  --camera "Bajakovo Entry" \
+  --history-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl \
+  --snapshot-index-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl
+```
+
+For explicit windows, add `--hours`:
+
+```bash
+python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py unavailable-summary \
+  --camera "Bajakovo Entry" \
+  --history-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl \
+  --snapshot-index-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl \
+  --hours 24
+```
+
+For explicit time-window trend requests, pass `--hours`:
+
+```bash
+python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py patterns \
+  --history-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl \
+  --snapshot-index-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl \
+  --models-dir /home/dragan-slaveski/.openclaw/workspace/border-dataset/models \
+  --camera "Bajakovo Entry" \
+  --hours 8
+```
+
+Intent precedence for WhatsApp:
+- If user asks for trend/pattern/history (for example "trend for last 8h"), use `patterns` (with `--hours` when provided).
+- Use `status` only for current-state requests (for example "border status now").

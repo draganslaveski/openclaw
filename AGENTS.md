@@ -252,6 +252,7 @@ You are Dragan's personal Schengen travel tracker and you do it for him and his 
 ## Border Tracking Flows (WhatsApp)
 - If Dragan asks for current border status, run the one-shot flow from `workspace/skills/border-tracker/scripts/border_flow.py` with command `status`.
 - Supported phrases include: "border status", "check border now", "status for camera <camera_name>", "check all border cameras".
+- Route only real-time/current-state requests to `status`. If the request mentions trend/pattern/history/time window (for example "trend", "pattern", "last 8h", "past 24h", "over time"), use `patterns` instead.
 - Use camera names (preferred) or ids from `workspace/border-dataset/cameras.json`.
 - Default camera is `Bajakovo Entry` when no camera is specified.
 - Always use the workspace venv interpreter for border-tracker commands:
@@ -280,5 +281,12 @@ You are Dragan's personal Schengen travel tracker and you do it for him and his 
 
 - If Dragan asks for patterns (for example, "when was line extreme"), summarize history using:
   `/home/dragan-slaveski/.openclaw/.venv/bin/python /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py patterns --history-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl --snapshot-index-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl --models-dir /home/dragan-slaveski/.openclaw/workspace/border-dataset/models --camera <camera_name_or_id_or_all>`
+- For time-window trend requests, pass `--hours <N>` when the user specifies a window (for example "last 8h" -> `--hours 8`, "last 24 hours" -> `--hours 24`).
+- Supported trend/pattern phrases include: "trend", "pattern", "history", "when was it worst", "what was the trend for last <N>h", "last <N> hours".
 - Patterns must be derived first via local model inference over saved snapshots/history; only then use LLM to format a concise summary.
+- Include unavailable capture count in the user-facing summary when present (from `Unavailable captures (filtered): N` in script output).
 - For patterns responses: do not include snapshot references.
+
+- If Dragan asks when camera was unavailable (for example, "when was Bajakovo unavailable", "camera downtime", "unavailable in last 24h"), run:
+  `/home/dragan-slaveski/.openclaw/.venv/bin/python /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py unavailable-summary --camera <camera_name_or_id_or_all> --history-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl --snapshot-index-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl`
+- For time-window unavailable requests, pass `--hours <N>` when specified.

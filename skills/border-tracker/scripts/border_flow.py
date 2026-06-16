@@ -8,7 +8,7 @@ import re
 import shlex
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +129,30 @@ def fetch_snapshot(url: str, timeout_sec: int) -> Image.Image:
         return tmp.convert("RGB")
 
 
+def is_unavailable_placeholder(image: Image.Image) -> bool:
+    # HAK unavailable frames are mostly uniform color with centered white text.
+    arr = np.asarray(image.resize((320, 180), Image.Resampling.BILINEAR), dtype=np.uint8)
+    body = arr[18:, :, :]
+
+    median_color = np.median(body.reshape(-1, 3), axis=0)
+    dist = np.linalg.norm(body.astype(np.float32) - median_color.astype(np.float32), axis=2)
+    flat_ratio = float(np.mean(dist < 24.0))
+
+    h, w, _ = arr.shape
+    center = arr[int(h * 0.35) : int(h * 0.65), int(w * 0.2) : int(w * 0.8), :]
+    center_med = np.median(center.reshape(-1, 3), axis=0)
+    center_dist = np.linalg.norm(center.astype(np.float32) - center_med.astype(np.float32), axis=2)
+    center_flat_ratio = float(np.mean(center_dist < 20.0))
+    white_mask = (center[:, :, 0] > 220) & (center[:, :, 1] > 220) & (center[:, :, 2] > 220)
+    white_ratio = float(np.mean(white_mask))
+
+    return flat_ratio > 0.92 and center_flat_ratio > 0.88 and white_ratio > 0.001
+
+
+class CameraUnavailableError(RuntimeError):
+    pass
+
+
 def to_hog_feature(image: Image.Image) -> np.ndarray:
     gray = image.convert("L")
     arr = np.asarray(gray.resize((96, 48), Image.Resampling.BILINEAR), dtype=np.float32) / 255.0
@@ -241,6 +265,14 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=True) + "\n")
 
 
+def rewrite_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "\n".join(json.dumps(r, ensure_ascii=True) for r in rows)
+    if text:
+        text += "\n"
+    path.write_text(text, encoding="utf-8")
+
+
 def run_status(args: argparse.Namespace) -> int:
     cameras = load_cameras(args.cameras_file, args.camera)
     if not cameras:
@@ -258,6 +290,8 @@ def run_status(args: argparse.Namespace) -> int:
         captured_at = now_iso()
         try:
             image = fetch_snapshot(url, args.timeout_sec)
+            if is_unavailable_placeholder(image):
+                raise CameraUnavailableError("camera image unavailable")
             pred = predictor.predict(image)
             row = {
                 "captured_at": captured_at,
@@ -278,6 +312,19 @@ def run_status(args: argparse.Namespace) -> int:
                 out = args.save_debug_dir / f"{safe_name(cam_id)}-{iso_to_filename_stamp(captured_at)}.jpg"
                 image.save(out, format="JPEG", quality=90)
                 row["snapshot_file"] = str(out)
+        except CameraUnavailableError as exc:
+            row = {
+                "captured_at": captured_at,
+                "camera_id": cam_id,
+                "camera_name": cam_name,
+                "url": url,
+                "status": "unavailable",
+                "unavailable_reason": str(exc),
+                "flow": args.flow_name,
+            }
+            results.append(row)
+            if args.history_file:
+                append_history(args.history_file, row)
         except Exception as exc:
             row = {
                 "captured_at": captured_at,
@@ -293,9 +340,10 @@ def run_status(args: argparse.Namespace) -> int:
                 append_history(args.history_file, row)
 
     ok = [r for r in results if r["status"] == "ok"]
+    unavailable = [r for r in results if r["status"] == "unavailable"]
     err = [r for r in results if r["status"] == "error"]
     print(f"BORDER STATUS ({args.flow_name})")
-    print(f"Checked: {len(results)} camera(s), ok={len(ok)}, error={len(err)}")
+    print(f"Checked: {len(results)} camera(s), ok={len(ok)}, unavailable={len(unavailable)}, error={len(err)}")
     for row in ok:
         score_txt = "" if row.get("score") is None else f" ({row['score']:.3f})"
         print(f"- {row['camera_name']} [{row['camera_id']}]: {row['line_bucket']}{score_txt}")
@@ -303,6 +351,8 @@ def run_status(args: argparse.Namespace) -> int:
             print(f"  snapshot_file: {row['snapshot_file']}")
         else:
             print("  snapshot_file: (not saved; run with --save-debug-dir)")
+    for row in unavailable:
+        print(f"- {row['camera_name']} [{row['camera_id']}]: UNAVAILABLE - {row.get('unavailable_reason', 'camera image unavailable')}")
     for row in err:
         print(f"- {row['camera_name']} [{row['camera_id']}]: ERROR - {row['error']}")
 
@@ -315,7 +365,7 @@ def run_status(args: argparse.Namespace) -> int:
             "results": results,
         }
         args.output_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return 0 if ok else 1
+    return 0 if (ok or unavailable) else 1
 
 
 def run_capture_snapshot(args: argparse.Namespace) -> int:
@@ -334,6 +384,8 @@ def run_capture_snapshot(args: argparse.Namespace) -> int:
 
         try:
             image = fetch_snapshot(url, args.timeout_sec)
+            if is_unavailable_placeholder(image):
+                raise CameraUnavailableError("camera image unavailable")
             out = args.snapshots_dir / f"{safe_name(cam_id)}-{iso_to_filename_stamp(captured_at)}.jpg"
             image.save(out, format="JPEG", quality=90)
 
@@ -344,6 +396,19 @@ def run_capture_snapshot(args: argparse.Namespace) -> int:
                 "url": url,
                 "status": "ok",
                 "snapshot_file": str(out),
+                "flow": args.flow_name,
+            }
+            results.append(row)
+            if args.snapshot_index_file:
+                append_jsonl(args.snapshot_index_file, row)
+        except CameraUnavailableError as exc:
+            row = {
+                "captured_at": captured_at,
+                "camera_id": cam_id,
+                "camera_name": cam_name,
+                "url": url,
+                "status": "unavailable",
+                "unavailable_reason": str(exc),
                 "flow": args.flow_name,
             }
             results.append(row)
@@ -364,11 +429,14 @@ def run_capture_snapshot(args: argparse.Namespace) -> int:
                 append_jsonl(args.snapshot_index_file, row)
 
     ok = [r for r in results if r["status"] == "ok"]
+    unavailable = [r for r in results if r["status"] == "unavailable"]
     err = [r for r in results if r["status"] == "error"]
     print(f"BORDER SNAPSHOT CAPTURE ({args.flow_name})")
-    print(f"Checked: {len(results)} camera(s), ok={len(ok)}, error={len(err)}")
+    print(f"Checked: {len(results)} camera(s), ok={len(ok)}, unavailable={len(unavailable)}, error={len(err)}")
     for row in ok:
         print(f"- {row['camera_name']} [{row['camera_id']}]: snapshot_file: {row['snapshot_file']}")
+    for row in unavailable:
+        print(f"- {row['camera_name']} [{row['camera_id']}]: UNAVAILABLE - {row.get('unavailable_reason', 'camera image unavailable')}")
     for row in err:
         print(f"- {row['camera_name']} [{row['camera_id']}]: ERROR - {row['error']}")
 
@@ -381,7 +449,7 @@ def run_capture_snapshot(args: argparse.Namespace) -> int:
             "results": results,
         }
         args.output_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return 0 if ok else 1
+    return 0 if (ok or unavailable) else 1
 
 
 def run_patterns(args: argparse.Namespace) -> int:
@@ -391,22 +459,57 @@ def run_patterns(args: argparse.Namespace) -> int:
     selected_ids = {str(c.get("id")) for c in selected}
 
     rows: list[dict[str, Any]] = []
-    history_rows = 0
+    unavailable_rows = 0
+
+    cutoff_local: datetime | None = None
+    if args.hours is not None:
+        if args.hours <= 0:
+            raise SystemExit("--hours must be a positive number")
+        cutoff_local = datetime.now().astimezone() - timedelta(hours=float(args.hours))
+
+    def parse_row_ts(row: dict[str, Any]) -> datetime | None:
+        raw = row.get("captured_at")
+        if not raw:
+            return None
+        try:
+            ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(datetime.now().astimezone().tzinfo)
+
     if args.history_file and args.history_file.exists():
         for line in args.history_file.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             row = json.loads(line)
-            if row.get("status") != "ok":
+            status = row.get("status")
+            if status == "unavailable":
+                if str(row.get("camera_id")) not in selected_ids:
+                    continue
+                local_ts = parse_row_ts(row)
+                if local_ts is None:
+                    continue
+                if cutoff_local is not None and local_ts < cutoff_local:
+                    continue
+                unavailable_rows += 1
+                continue
+            if status != "ok":
                 continue
             if str(row.get("camera_id")) not in selected_ids:
                 continue
             if not row.get("line_bucket"):
                 continue
-            rows.append(row)
-            history_rows += 1
+            local_ts = parse_row_ts(row)
+            if local_ts is None:
+                continue
+            if cutoff_local is not None and local_ts < cutoff_local:
+                continue
+            row_copy = dict(row)
+            row_copy["source"] = "history"
+            rows.append(row_copy)
 
-    inferred_rows = 0
     if args.snapshot_index_file and args.snapshot_index_file.exists():
         predictor = QueuePredictor(args.models_dir)
         if predictor.available():
@@ -414,16 +517,36 @@ def run_patterns(args: argparse.Namespace) -> int:
                 if not line.strip():
                     continue
                 row = json.loads(line)
-                if row.get("status") != "ok":
+                status = row.get("status")
+                if status == "unavailable":
+                    if str(row.get("camera_id")) not in selected_ids:
+                        continue
+                    local_ts = parse_row_ts(row)
+                    if local_ts is None:
+                        continue
+                    if cutoff_local is not None and local_ts < cutoff_local:
+                        continue
+                    unavailable_rows += 1
+                    continue
+                if status != "ok":
                     continue
                 if str(row.get("camera_id")) not in selected_ids:
+                    continue
+                local_ts = parse_row_ts(row)
+                if local_ts is None:
+                    continue
+                if cutoff_local is not None and local_ts < cutoff_local:
                     continue
                 snapshot_path = Path(str(row.get("snapshot_file", "")))
                 if not snapshot_path.exists():
                     continue
                 try:
                     with Image.open(snapshot_path) as img:
-                        pred = predictor.predict(img.convert("RGB"))
+                        rgb = img.convert("RGB")
+                        if is_unavailable_placeholder(rgb):
+                            unavailable_rows += 1
+                            continue
+                        pred = predictor.predict(rgb)
                     rows.append(
                         {
                             "captured_at": row.get("captured_at", now_iso()),
@@ -437,16 +560,20 @@ def run_patterns(args: argparse.Namespace) -> int:
                             "snapshot_file": str(snapshot_path),
                         }
                     )
-                    inferred_rows += 1
                 except Exception:
                     continue
 
     if not rows:
         print("No matching samples for patterns (history or snapshot inference).")
+        if unavailable_rows:
+            print(f"Unavailable captures (filtered): {unavailable_rows}")
         return 0
 
     local_tz = datetime.now().astimezone().tzinfo
     tz_label = str(local_tz) if local_tz is not None else "local"
+
+    history_rows = sum(1 for r in rows if r.get("source") == "history")
+    inferred_rows = sum(1 for r in rows if r.get("source") == "snapshot_inference")
 
     by_hour: dict[int, dict[str, int]] = {}
     total_extreme = 0
@@ -465,7 +592,10 @@ def run_patterns(args: argparse.Namespace) -> int:
 
     print("BORDER PATTERNS")
     print(f"Camera: {args.camera}")
+    if cutoff_local is not None:
+        print(f"Window: last {args.hours:g} hour(s)")
     print(f"Data sources: history={history_rows}, inferred_from_snapshots={inferred_rows}")
+    print(f"Unavailable captures (filtered): {unavailable_rows}")
     print(f"Samples: {len(rows)}, extreme samples: {total_extreme}")
     print(f"Extreme by hour ({tz_label}):")
     for hour in sorted(by_hour):
@@ -473,6 +603,192 @@ def run_patterns(args: argparse.Namespace) -> int:
         ext = by_hour[hour]["extreme"]
         ratio = 100.0 * ext / max(samples, 1)
         print(f"- {hour:02d}:00-{hour:02d}:59 -> extreme {ext}/{samples} ({ratio:.1f}%)")
+    return 0
+
+
+def run_backfill_unavailable(args: argparse.Namespace) -> int:
+    run_ts = now_iso()
+    reason = "camera image unavailable"
+    cache: dict[str, bool] = {}
+
+    def check_unavailable(snapshot_path: Path) -> bool:
+        key = str(snapshot_path)
+        if key in cache:
+            return cache[key]
+        try:
+            with Image.open(snapshot_path) as img:
+                cache[key] = is_unavailable_placeholder(img.convert("RGB"))
+        except Exception:
+            cache[key] = False
+        return cache[key]
+
+    snapshot_total = 0
+    snapshot_marked = 0
+    snapshot_rows: list[dict[str, Any]] = []
+    if args.snapshot_index_file.exists():
+        for line in args.snapshot_index_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            snapshot_total += 1
+            if row.get("status") == "ok":
+                p = Path(str(row.get("snapshot_file", "")))
+                if p.exists() and check_unavailable(p):
+                    row["status"] = "unavailable"
+                    row["unavailable_reason"] = reason
+                    row["unavailable_detected_at"] = run_ts
+                    row["availability_source"] = "backfill"
+                    row.pop("error", None)
+                    snapshot_marked += 1
+            snapshot_rows.append(row)
+
+    history_total = 0
+    history_marked = 0
+    history_rows: list[dict[str, Any]] = []
+    if args.history_file.exists():
+        for line in args.history_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            history_total += 1
+            if row.get("status") == "ok":
+                snapshot_path = None
+                raw_snapshot = row.get("snapshot_file")
+                if raw_snapshot:
+                    snapshot_path = Path(str(raw_snapshot))
+                else:
+                    cam_id = str(row.get("camera_id", "")).strip()
+                    captured_at = row.get("captured_at")
+                    if cam_id and captured_at:
+                        try:
+                            stamp = iso_to_filename_stamp(str(captured_at))
+                            snapshot_path = args.snapshots_dir / f"{safe_name(cam_id)}-{stamp}.jpg"
+                        except Exception:
+                            snapshot_path = None
+
+                if snapshot_path and snapshot_path.exists() and check_unavailable(snapshot_path):
+                    row["status"] = "unavailable"
+                    row["unavailable_reason"] = reason
+                    row["unavailable_detected_at"] = run_ts
+                    row["availability_source"] = "backfill"
+                    row.pop("line_bucket", None)
+                    row.pop("score", None)
+                    row.pop("model", None)
+                    history_marked += 1
+            history_rows.append(row)
+
+    if args.apply:
+        if snapshot_rows:
+            rewrite_jsonl(args.snapshot_index_file, snapshot_rows)
+        if history_rows:
+            rewrite_jsonl(args.history_file, history_rows)
+        print("Backfill mode: APPLY")
+    else:
+        print("Backfill mode: DRY-RUN (no files written)")
+
+    print(
+        f"Snapshot index: total_rows={snapshot_total}, marked_unavailable={snapshot_marked}, file={args.snapshot_index_file}"
+    )
+    print(f"History: total_rows={history_total}, marked_unavailable={history_marked}, file={args.history_file}")
+    print(f"Checked unique snapshot files: {len(cache)}")
+    return 0
+
+
+def run_unavailable_summary(args: argparse.Namespace) -> int:
+    selected = load_cameras(args.cameras_file, args.camera)
+    if not selected:
+        raise SystemExit(f"No enabled cameras matched camera={args.camera}")
+    selected_ids = {str(c.get("id")) for c in selected}
+
+    cutoff_local: datetime | None = None
+    if args.hours is not None:
+        if args.hours <= 0:
+            raise SystemExit("--hours must be a positive number")
+        cutoff_local = datetime.now().astimezone() - timedelta(hours=float(args.hours))
+
+    def parse_row_ts(row: dict[str, Any]) -> datetime | None:
+        raw = row.get("captured_at")
+        if not raw:
+            return None
+        try:
+            ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(datetime.now().astimezone().tzinfo)
+
+    events: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def ingest_row(row: dict[str, Any], source: str) -> None:
+        status = str(row.get("status", ""))
+        if status != "unavailable":
+            return
+        cam_id = str(row.get("camera_id", ""))
+        if cam_id not in selected_ids:
+            return
+        local_ts = parse_row_ts(row)
+        if local_ts is None:
+            return
+        if cutoff_local is not None and local_ts < cutoff_local:
+            return
+        key = (cam_id, local_ts.isoformat(), source)
+        if key in seen:
+            return
+        seen.add(key)
+        events.append(
+            {
+                "captured_at": local_ts,
+                "camera_id": cam_id,
+                "camera_name": row.get("camera_name", cam_id),
+                "reason": row.get("unavailable_reason", "camera image unavailable"),
+                "source": source,
+            }
+        )
+
+    if args.history_file.exists():
+        for line in args.history_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            ingest_row(json.loads(line), "history")
+
+    if args.snapshot_index_file.exists():
+        for line in args.snapshot_index_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            ingest_row(json.loads(line), "snapshot_index")
+
+    events.sort(key=lambda e: e["captured_at"])
+
+    print("BORDER UNAVAILABLE SUMMARY")
+    print(f"Camera: {args.camera}")
+    if cutoff_local is not None:
+        print(f"Window: last {args.hours:g} hour(s)")
+    print(f"Unavailable events: {len(events)}")
+
+    if not events:
+        return 0
+
+    by_hour: dict[int, int] = {}
+    for e in events:
+        hour = int(e["captured_at"].hour)
+        by_hour[hour] = by_hour.get(hour, 0) + 1
+
+    first = events[0]
+    last = events[-1]
+    print(f"First unavailable: {first['captured_at'].isoformat()} [{first['camera_name']}]")
+    print(f"Last unavailable: {last['captured_at'].isoformat()} [{last['camera_name']}]")
+    print("Unavailable by hour (local):")
+    for hour in sorted(by_hour):
+        print(f"- {hour:02d}:00-{hour:02d}:59 -> {by_hour[hour]}")
+
+    preview = events[-min(10, len(events)) :]
+    print("Most recent unavailable events:")
+    for e in preview:
+        print(
+            f"- {e['captured_at'].isoformat()} | {e['camera_name']} [{e['camera_id']}] | {e['reason']} | source={e['source']}"
+        )
     return 0
 
 
@@ -672,6 +988,50 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl"),
     )
+    patterns.add_argument("--hours", type=float, help="Restrict analysis to the last N hours")
+
+    backfill = sub.add_parser(
+        "backfill-unavailable",
+        help="Retroactively mark unavailable placeholder frames in history/snapshot index",
+    )
+    backfill.add_argument(
+        "--history-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl"),
+    )
+    backfill.add_argument(
+        "--snapshot-index-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl"),
+    )
+    backfill.add_argument(
+        "--snapshots-dir",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshots"),
+    )
+    backfill.add_argument("--apply", action="store_true", help="Write updated statuses to JSONL files")
+
+    unavailable = sub.add_parser(
+        "unavailable-summary",
+        help="Summarize when selected camera(s) were unavailable",
+    )
+    unavailable.add_argument("--camera", default="Bajakovo Entry")
+    unavailable.add_argument(
+        "--cameras-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json"),
+    )
+    unavailable.add_argument(
+        "--history-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/history.jsonl"),
+    )
+    unavailable.add_argument(
+        "--snapshot-index-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl"),
+    )
+    unavailable.add_argument("--hours", type=float, help="Restrict summary to the last N hours")
 
     monitor = sub.add_parser("upsert-monitor-job", help="Create/update monitoring cron entry")
     monitor.add_argument("--camera", default="Bajakovo Entry")
@@ -720,6 +1080,10 @@ def main() -> int:
         return run_capture_snapshot(args)
     if args.cmd == "patterns":
         return run_patterns(args)
+    if args.cmd == "backfill-unavailable":
+        return run_backfill_unavailable(args)
+    if args.cmd == "unavailable-summary":
+        return run_unavailable_summary(args)
     if args.cmd == "upsert-monitor-job":
         return run_upsert_monitor_job(args)
     if args.cmd == "upsert-system-cron":
