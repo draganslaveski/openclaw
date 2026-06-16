@@ -293,6 +293,7 @@ You are Dragan's personal Schengen travel tracker and you do it for him and his 
 
 - If the same request asks both trend and unavailability (for example, "What's the trend for last 12h, when was camera unavailable?"), run both commands (`patterns` and `unavailable-summary`) with the same `--camera` and `--hours`, then combine both outputs in one reply.
 - For trend responses, include `Snapshot records in window` and `Snapshot status split` from script output when present to avoid undercount/misreporting.
+- If patterns output includes `Insufficient coverage hours` or unavailable-by-hour records, do not label those hours as "quiet", "lowest", or "best time"; present them as unknown due to camera downtime.
 
 - If Dragan asks whether snapshots exist or asks for snapshot count/list in a time window (for example, "do we have snapshots for last 12h", "how many snapshots in last 8h", "latest snapshots"), run:
   `/home/dragan-slaveski/.openclaw/.venv/bin/python /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py snapshot-summary --camera <camera_name_or_id_or_all> --snapshot-index-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl`

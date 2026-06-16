@@ -460,6 +460,7 @@ def run_patterns(args: argparse.Namespace) -> int:
 
     rows: list[dict[str, Any]] = []
     unavailable_rows = 0
+    unavailable_by_hour: dict[int, int] = {}
     snapshot_status_counts: dict[str, int] = {}
     snapshot_rows_in_window = 0
     snapshot_inference_enabled = False
@@ -497,6 +498,7 @@ def run_patterns(args: argparse.Namespace) -> int:
                 if cutoff_local is not None and local_ts < cutoff_local:
                     continue
                 unavailable_rows += 1
+                unavailable_by_hour[local_ts.hour] = unavailable_by_hour.get(local_ts.hour, 0) + 1
                 continue
             if status != "ok":
                 continue
@@ -534,6 +536,7 @@ def run_patterns(args: argparse.Namespace) -> int:
 
             if status == "unavailable":
                 unavailable_rows += 1
+                unavailable_by_hour[local_ts.hour] = unavailable_by_hour.get(local_ts.hour, 0) + 1
                 continue
             if status != "ok":
                 continue
@@ -548,6 +551,7 @@ def run_patterns(args: argparse.Namespace) -> int:
                     rgb = img.convert("RGB")
                     if is_unavailable_placeholder(rgb):
                         unavailable_rows += 1
+                        unavailable_by_hour[local_ts.hour] = unavailable_by_hour.get(local_ts.hour, 0) + 1
                         continue
                     pred = predictor.predict(rgb)
                 rows.append(
@@ -599,6 +603,8 @@ def run_patterns(args: argparse.Namespace) -> int:
             by_hour[hour]["extreme"] += 1
             total_extreme += 1
 
+    insufficient_hours = sorted(h for h, n in unavailable_by_hour.items() if by_hour.get(h, {}).get("samples", 0) == 0 and n > 0)
+
     print("BORDER PATTERNS")
     print(f"Camera: {args.camera}")
     if cutoff_local is not None:
@@ -611,6 +617,14 @@ def run_patterns(args: argparse.Namespace) -> int:
     if not snapshot_inference_enabled and args.snapshot_index_file and args.snapshot_index_file.exists():
         print("Snapshot inference: disabled (no model available)")
     print(f"Unavailable captures (filtered): {unavailable_rows}")
+    if unavailable_by_hour:
+        print("Unavailable by hour (local):")
+        for hour in sorted(unavailable_by_hour):
+            print(f"- {hour:02d}:00-{hour:02d}:59 -> unavailable {unavailable_by_hour[hour]}")
+    if insufficient_hours:
+        hour_ranges = ", ".join(f"{h:02d}:00-{h:02d}:59" for h in insufficient_hours)
+        print(f"Insufficient coverage hours (unavailable with no usable samples): {hour_ranges}")
+        print("Trend interpretation note: do not treat insufficient coverage hours as quiet/low-traffic windows.")
     print(f"Samples: {len(rows)}, extreme samples: {total_extreme}")
     print(f"Extreme by hour ({tz_label}):")
     for hour in sorted(by_hour):

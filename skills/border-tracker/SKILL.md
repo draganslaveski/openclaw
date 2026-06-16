@@ -112,6 +112,12 @@ Patterns output also reports unavailable captures filtered from analysis:
 - `Snapshot records in window: N`
 - `Snapshot status split: ok=X, unavailable=Y, error=Z`
 
+When present, these lines must be treated as data-quality guards:
+- `Insufficient coverage hours ...`
+- `Trend interpretation note: do not treat insufficient coverage hours as quiet/low-traffic windows.`
+
+For user-facing summaries, do not call those hours "quietest" or "best time"; report them as unknown due to downtime.
+
 Time handling for pattern responses:
 - Hour buckets must be interpreted and reported in local machine timezone (user timezone), not UTC.
 
