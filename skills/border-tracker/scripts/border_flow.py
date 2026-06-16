@@ -460,6 +460,9 @@ def run_patterns(args: argparse.Namespace) -> int:
 
     rows: list[dict[str, Any]] = []
     unavailable_rows = 0
+    snapshot_status_counts: dict[str, int] = {}
+    snapshot_rows_in_window = 0
+    snapshot_inference_enabled = False
 
     cutoff_local: datetime | None = None
     if args.hours is not None:
@@ -512,59 +515,65 @@ def run_patterns(args: argparse.Namespace) -> int:
 
     if args.snapshot_index_file and args.snapshot_index_file.exists():
         predictor = QueuePredictor(args.models_dir)
-        if predictor.available():
-            for line in args.snapshot_index_file.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                status = row.get("status")
-                if status == "unavailable":
-                    if str(row.get("camera_id")) not in selected_ids:
+        snapshot_inference_enabled = predictor.available()
+        for line in args.snapshot_index_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if str(row.get("camera_id")) not in selected_ids:
+                continue
+            local_ts = parse_row_ts(row)
+            if local_ts is None:
+                continue
+            if cutoff_local is not None and local_ts < cutoff_local:
+                continue
+
+            status = str(row.get("status", "unknown"))
+            snapshot_rows_in_window += 1
+            snapshot_status_counts[status] = snapshot_status_counts.get(status, 0) + 1
+
+            if status == "unavailable":
+                unavailable_rows += 1
+                continue
+            if status != "ok":
+                continue
+
+            snapshot_path = Path(str(row.get("snapshot_file", "")))
+            if not snapshot_path.exists():
+                continue
+            if not snapshot_inference_enabled:
+                continue
+            try:
+                with Image.open(snapshot_path) as img:
+                    rgb = img.convert("RGB")
+                    if is_unavailable_placeholder(rgb):
+                        unavailable_rows += 1
                         continue
-                    local_ts = parse_row_ts(row)
-                    if local_ts is None:
-                        continue
-                    if cutoff_local is not None and local_ts < cutoff_local:
-                        continue
-                    unavailable_rows += 1
-                    continue
-                if status != "ok":
-                    continue
-                if str(row.get("camera_id")) not in selected_ids:
-                    continue
-                local_ts = parse_row_ts(row)
-                if local_ts is None:
-                    continue
-                if cutoff_local is not None and local_ts < cutoff_local:
-                    continue
-                snapshot_path = Path(str(row.get("snapshot_file", "")))
-                if not snapshot_path.exists():
-                    continue
-                try:
-                    with Image.open(snapshot_path) as img:
-                        rgb = img.convert("RGB")
-                        if is_unavailable_placeholder(rgb):
-                            unavailable_rows += 1
-                            continue
-                        pred = predictor.predict(rgb)
-                    rows.append(
-                        {
-                            "captured_at": row.get("captured_at", now_iso()),
-                            "camera_id": row.get("camera_id"),
-                            "camera_name": row.get("camera_name"),
-                            "status": "ok",
-                            "line_bucket": pred.label,
-                            "score": pred.score,
-                            "model": pred.model_name,
-                            "source": "snapshot_inference",
-                            "snapshot_file": str(snapshot_path),
-                        }
-                    )
-                except Exception:
-                    continue
+                    pred = predictor.predict(rgb)
+                rows.append(
+                    {
+                        "captured_at": row.get("captured_at", now_iso()),
+                        "camera_id": row.get("camera_id"),
+                        "camera_name": row.get("camera_name"),
+                        "status": "ok",
+                        "line_bucket": pred.label,
+                        "score": pred.score,
+                        "model": pred.model_name,
+                        "source": "snapshot_inference",
+                        "snapshot_file": str(snapshot_path),
+                    }
+                )
+            except Exception:
+                continue
 
     if not rows:
         print("No matching samples for patterns (history or snapshot inference).")
+        print(f"Snapshot records in window: {snapshot_rows_in_window}")
+        if snapshot_status_counts:
+            parts = ", ".join(f"{k}={snapshot_status_counts[k]}" for k in sorted(snapshot_status_counts))
+            print(f"Snapshot status split: {parts}")
+        if not snapshot_inference_enabled and args.snapshot_index_file and args.snapshot_index_file.exists():
+            print("Snapshot inference: disabled (no model available)")
         if unavailable_rows:
             print(f"Unavailable captures (filtered): {unavailable_rows}")
         return 0
@@ -595,6 +604,12 @@ def run_patterns(args: argparse.Namespace) -> int:
     if cutoff_local is not None:
         print(f"Window: last {args.hours:g} hour(s)")
     print(f"Data sources: history={history_rows}, inferred_from_snapshots={inferred_rows}")
+    print(f"Snapshot records in window: {snapshot_rows_in_window}")
+    if snapshot_status_counts:
+        parts = ", ".join(f"{k}={snapshot_status_counts[k]}" for k in sorted(snapshot_status_counts))
+        print(f"Snapshot status split: {parts}")
+    if not snapshot_inference_enabled and args.snapshot_index_file and args.snapshot_index_file.exists():
+        print("Snapshot inference: disabled (no model available)")
     print(f"Unavailable captures (filtered): {unavailable_rows}")
     print(f"Samples: {len(rows)}, extreme samples: {total_extreme}")
     print(f"Extreme by hour ({tz_label}):")
@@ -789,6 +804,78 @@ def run_unavailable_summary(args: argparse.Namespace) -> int:
         print(
             f"- {e['captured_at'].isoformat()} | {e['camera_name']} [{e['camera_id']}] | {e['reason']} | source={e['source']}"
         )
+    return 0
+
+
+def run_snapshot_summary(args: argparse.Namespace) -> int:
+    selected = load_cameras(args.cameras_file, args.camera)
+    if not selected:
+        raise SystemExit(f"No enabled cameras matched camera={args.camera}")
+    selected_ids = {str(c.get("id")) for c in selected}
+
+    cutoff_local: datetime | None = None
+    if args.hours is not None:
+        if args.hours <= 0:
+            raise SystemExit("--hours must be a positive number")
+        cutoff_local = datetime.now().astimezone() - timedelta(hours=float(args.hours))
+
+    def parse_row_ts(row: dict[str, Any]) -> datetime | None:
+        raw = row.get("captured_at")
+        if not raw:
+            return None
+        try:
+            ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(datetime.now().astimezone().tzinfo)
+
+    rows: list[dict[str, Any]] = []
+    if args.snapshot_index_file.exists():
+        for line in args.snapshot_index_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if str(row.get("camera_id")) not in selected_ids:
+                continue
+            ts = parse_row_ts(row)
+            if ts is None:
+                continue
+            if cutoff_local is not None and ts < cutoff_local:
+                continue
+            row_copy = dict(row)
+            row_copy["_ts"] = ts
+            rows.append(row_copy)
+
+    rows.sort(key=lambda r: r["_ts"])
+
+    status_counts: dict[str, int] = {}
+    for r in rows:
+        status = str(r.get("status", "unknown"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    print("BORDER SNAPSHOT SUMMARY")
+    print(f"Camera: {args.camera}")
+    if cutoff_local is not None:
+        print(f"Window: last {args.hours:g} hour(s)")
+    print(f"Total snapshot records: {len(rows)}")
+    for key in sorted(status_counts):
+        print(f"- {key}: {status_counts[key]}")
+
+    ok_rows = [r for r in rows if r.get("status") == "ok"]
+    if ok_rows:
+        print(f"First OK snapshot: {ok_rows[0]['captured_at']}")
+        print(f"Last OK snapshot: {ok_rows[-1]['captured_at']}")
+
+    preview = rows[-min(5, len(rows)) :]
+    if preview:
+        print("Most recent snapshot records:")
+        for r in preview:
+            cam_name = r.get("camera_name", r.get("camera_id", "unknown"))
+            print(
+                f"- {r.get('captured_at')} | {cam_name} [{r.get('camera_id')}] | status={r.get('status')}"
+            )
     return 0
 
 
@@ -1033,6 +1120,23 @@ def parse_args() -> argparse.Namespace:
     )
     unavailable.add_argument("--hours", type=float, help="Restrict summary to the last N hours")
 
+    snapshot_summary = sub.add_parser(
+        "snapshot-summary",
+        help="Summarize snapshot records and statuses for selected camera(s)",
+    )
+    snapshot_summary.add_argument("--camera", default="Bajakovo Entry")
+    snapshot_summary.add_argument(
+        "--cameras-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/border-dataset/cameras.json"),
+    )
+    snapshot_summary.add_argument(
+        "--snapshot-index-file",
+        type=Path,
+        default=Path("/home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl"),
+    )
+    snapshot_summary.add_argument("--hours", type=float, help="Restrict summary to the last N hours")
+
     monitor = sub.add_parser("upsert-monitor-job", help="Create/update monitoring cron entry")
     monitor.add_argument("--camera", default="Bajakovo Entry")
     monitor.add_argument("--interval-min", type=int, required=True)
@@ -1084,6 +1188,8 @@ def main() -> int:
         return run_backfill_unavailable(args)
     if args.cmd == "unavailable-summary":
         return run_unavailable_summary(args)
+    if args.cmd == "snapshot-summary":
+        return run_snapshot_summary(args)
     if args.cmd == "upsert-monitor-job":
         return run_upsert_monitor_job(args)
     if args.cmd == "upsert-system-cron":

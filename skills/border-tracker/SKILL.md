@@ -109,6 +109,8 @@ This prints intervals where extreme queue predictions are more common, using:
 
 Patterns output also reports unavailable captures filtered from analysis:
 - `Unavailable captures (filtered): N`
+- `Snapshot records in window: N`
+- `Snapshot status split: ok=X, unavailable=Y, error=Z`
 
 Time handling for pattern responses:
 - Hour buckets must be interpreted and reported in local machine timezone (user timezone), not UTC.
@@ -148,6 +150,26 @@ python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/
   --snapshot-index-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl \
   --hours 24
 ```
+
+## Snapshot Availability Query
+When user asks if snapshots exist / how many snapshots exist in a window, run:
+
+```bash
+python3 /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/scripts/border_flow.py snapshot-summary \
+  --camera "Bajakovo Entry" \
+  --snapshot-index-file /home/dragan-slaveski/.openclaw/workspace/skills/border-tracker/state/snapshot_index.jsonl \
+  --hours 12
+```
+
+This reports:
+- total snapshot records in the window,
+- status split (`ok`, `unavailable`, `error`),
+- first/last OK snapshot timestamps,
+- most recent snapshot records.
+
+For combined asks (trend + unavailable in one message):
+- Run both `patterns` and `unavailable-summary` with the same camera/window.
+- Return a combined response that includes both trend and downtime sections.
 
 For explicit time-window trend requests, pass `--hours`:
 
